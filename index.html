@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>IPTV Org Browser</title>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header>
+<button id="sidebarToggle" title="Toggle channel list">☰</button>
+<h1>iptv-org browser</h1>
+</header>
+<main>
+<aside id="sidebar">
+<div class="list-controls">
+<input id="search" placeholder="Search channels..." />
+<select id="country">
+<option value="">All countries</option>
+</select>
+<select id="provider">
+<option value="">All providers</option>
+</select>
+<label><input type="checkbox" id="favToggle" autocomplete="off"> Show favorites only</label>
+<label><input type="checkbox" id="reliableToggle" autocomplete="off"> Show reliable CDN only</label>
+<label><input type="checkbox" id="workingToggle" autocomplete="off"> Show tested working only</label>
+<div id="sourceToggles" style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px;font-size:.8rem;"></div>
+<div class="jump">
+<button id="topBtn">↑ Top</button>
+<button id="bottomBtn">↓ Bottom</button>
+</div>
+</div>
+<div id="list"><div class="empty">Loading channels...</div></div>
+<div id="stats">Loading status...</div>
+</aside>
+<div class="player">
+<video id="video" controls autoplay playsinline></video>
+<div class="info" id="info">Select a channel</div>
+</div>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
