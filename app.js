@@ -44,6 +44,8 @@ let statusSaveTimer = null;
 let remoteDirty = false;
 let remoteTimer = null;
 let refreshLoop = true;
+let simpleMode = false;
+let streamsByChannel = new Map();
 function countryFlag(code) {
   if (!code || code.length !== 2) return '';
   const upper = code.toUpperCase();
@@ -136,7 +138,11 @@ function updateStats() {
     else if (s === 'dead') d++;
   }
   const total = allChannels.filter(c => (channelRank.get(c.id) ?? 2) < 2).length;
-  el.textContent = `🟢 ${w.toLocaleString()} working • 🔴 ${d.toLocaleString()} dead • ⚪ ${(total - w - d).toLocaleString()} untested • ${total.toLocaleString()} with streams`;
+  if (simpleMode) {
+    el.textContent = `● ${w.toLocaleString()} LIVE • ${filteredChannels.length.toLocaleString()} SHOWS`;
+  } else {
+    el.textContent = `🟢 ${w.toLocaleString()} working • 🔴 ${d.toLocaleString()} dead • ⚪ ${(total - w - d).toLocaleString()} untested • ${total.toLocaleString()} with streams`;
+  }
 }
 
 async function loadAllSources() {
@@ -234,10 +240,13 @@ function parseExtinf(line) {
 }
 
 function buildMaps() {
+  channelMap.clear();
+  countries.clear();
   allChannels.forEach(c => {
     channelMap.set(c.id, c);
     if (c.country) countries.add(c.country);
   });
+  buildStreamsIndex();
 }
 
 function inferProvider(ch) {
@@ -669,7 +678,12 @@ function renderVirtualList() {
     const logoHtml = logoUrl
       ? `<img class="logo" src="${logoUrl}" loading="lazy" onerror="this.style.display='none'">`
       : `<span class="logo logo-fallback">${(c.name[0] || '?').toUpperCase()}</span>`;
-    div.innerHTML = `<span class="status-badge ${statusClass}">${statusIcon}</span>${logoHtml}<button class="fav-btn" data-id="${c.id}" title="Toggle favorite">${isFav ? '★' : '☆'}</button><div class="channel-info"><div class="name">${c.name}</div><div class="meta">${[c.provider, countryFlag(c.country) + ' ' + c.country, (c.categories || []).join(', ')].filter(Boolean).join(' • ')}${isBlocked ? ` • BLOCKED:${reason}` : ''}</div></div>`;
+    
+    const metaParts = simpleMode 
+      ? [c.provider].filter(Boolean)
+      : [c.provider, countryFlag(c.country) + ' ' + c.country, (c.categories || []).join(', ')];
+    
+    div.innerHTML = `<span class="status-badge ${statusClass}">${statusIcon}</span>${logoHtml}<button class="fav-btn" data-id="${c.id}" title="Toggle favorite">${isFav ? '★' : '☆'}</button><div class="channel-info"><div class="name">${c.name}</div><div class="meta">${metaParts.filter(Boolean).join(' • ')}${isBlocked ? ` • BLOCKED` : ''}</div></div>`;
     div.onclick = (e) => {
       if (e.target.classList.contains('fav-btn')) {
         const id = e.target.dataset.id;
@@ -703,6 +717,74 @@ document.getElementById('bottomBtn').addEventListener('click', () => { const el 
 document.getElementById('sidebarToggle').addEventListener('click', () => document.querySelector('main').classList.toggle('collapsed'));
 document.getElementById('list').addEventListener('scroll', renderVirtualList, {passive: true});
 
+// CYBERPUNK UX ENHANCEMENTS
+const simpleToggle = document.getElementById('simpleModeToggle');
+if (simpleToggle) {
+  simpleMode = localStorage.getItem('iptv_simple_mode') === 'true';
+  if (simpleMode) {
+    document.body.classList.add('simplified');
+    simpleToggle.textContent = 'Advanced Mode';
+  }
+  simpleToggle.addEventListener('click', () => {
+    simpleMode = !simpleMode;
+    document.body.classList.toggle('simplified', simpleMode);
+    localStorage.setItem('iptv_simple_mode', simpleMode);
+    simpleToggle.textContent = simpleMode ? 'Advanced Mode' : 'Simple Mode';
+    setTimeout(applyFilters, 100);
+  });
+}
+
+// Quick Categories for Simple Mode
+const quickCats = document.getElementById('quickCategories');
+if (quickCats) {
+  quickCats.addEventListener('click', () => {
+    const cats = ['Kids', 'News', 'Sports', 'Movies', 'Music', 'Children'];
+    const chosen = prompt('Pick category:\n' + cats.join('\n'), 'Kids');
+    if (chosen) {
+      document.getElementById('search').value = chosen;
+      applyFilters();
+    }
+  });
+}
+
+// Mobile bottom nav handlers
+document.getElementById('navFavs')?.addEventListener('click', (e) => {
+  e.preventDefault();
+  document.getElementById('favToggle').checked = true;
+  applyFilters();
+});
+document.getElementById('navSearch')?.addEventListener('click', (e) => {
+  e.preventDefault();
+  document.getElementById('sidebarToggle').click();
+  document.getElementById('search').focus();
+});
+document.getElementById('navMore')?.addEventListener('click', (e) => {
+  e.preventDefault();
+  document.querySelector('main').classList.toggle('collapsed');
+});
+
+// Improve error messages for non-technical users
+const originalPlay = selectChannel;
+function selectChannel(id, el) {
+  try {
+    originalPlay(id, el);
+  } catch (e) {
+    updateChannelStatus('Finding another signal...', 'testing');
+    console.error(e);
+  }
+}
+
+// Build streams index for performance
+function buildStreamsIndex() {
+  streamsByChannel.clear();
+  for (const s of allStreams) {
+    if (!streamsByChannel.has(s.channelId)) {
+      streamsByChannel.set(s.channelId, []);
+    }
+    streamsByChannel.get(s.channelId).push(s);
+  }
+}
+
 let favoriteFlushTimer = null;
 function scheduleFavoriteFlush() {
   if (favoriteFlushTimer) clearTimeout(favoriteFlushTimer);
@@ -721,4 +803,15 @@ async function flushFavoriteFavorites() {
 }
 
 let searchDebounce = null;
+
+function updateChannelStatus(message, type = 'info') {
+  const el = document.getElementById('channelStatus');
+  if (!el) return;
+  el.textContent = `● ${message.toUpperCase()}`;
+  el.style.color = type === 'error' ? '#ff4444' : type === 'testing' ? 'var(--neon-cyan)' : 'var(--neon-lime)';
+}
+
+// Override play error messages
+const originalPlay = window.selectChannel || null;
+
 load();

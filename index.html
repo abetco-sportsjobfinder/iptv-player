@@ -2,43 +2,65 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>IPTV Org Browser</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+<meta name="theme-color" content="#0a0a0f" />
+<title>NEON STREAM — Cyber IPTV</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <header>
 <button id="sidebarToggle" title="Toggle channel list">☰</button>
-<h1>iptv-org browser</h1>
+<h1>NEON STREAM</h1>
+<button id="simpleModeToggle" class="glass-button" style="margin-left:auto;padding:8px 16px;font-size:0.85rem">Simple Mode</button>
 </header>
 <main>
 <aside id="sidebar">
-<div class="list-controls">
-<input id="search" placeholder="Search channels..." />
+<div class="list-controls glass-card">
+<input id="search" placeholder="⌕ SEARCH CHANNELS..." autocomplete="off" />
+<button id="quickCategories" class="glass-button" style="width:100%">🎯 Quick Categories</button>
 <select id="country">
-<option value="">All countries</option>
+<option value="">🌍 All Countries</option>
 </select>
 <select id="provider">
-<option value="">All providers</option>
+<option value="">📡 All Providers</option>
 </select>
-<label><input type="checkbox" id="favToggle" autocomplete="off"> Show favorites only</label>
-<label><input type="checkbox" id="reliableToggle" autocomplete="off"> Show reliable CDN only</label>
-<label><input type="checkbox" id="workingToggle" autocomplete="off"> Show tested working only</label>
-<div id="sourceToggles" style="margin-top:8px;display:flex;flex-wrap:wrap;gap:8px;font-size:.8rem;"></div>
+<div id="simpleFilters" style="display:flex;flex-direction:column;gap:10px">
+<label><input type="checkbox" id="favToggle" autocomplete="off"> ⭐ Favorites Only</label>
+<label><input type="checkbox" id="reliableToggle" autocomplete="off"> ⚡ Reliable Only</label>
+<label><input type="checkbox" id="workingToggle" autocomplete="off"> ✅ Tested Working</label>
+</div>
+<div id="sourceToggles" style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px"></div>
 <div class="jump">
-<button id="topBtn">↑ Top</button>
-<button id="bottomBtn">↓ Bottom</button>
+<button id="topBtn">↑ TOP</button>
+<button id="bottomBtn">↓ BOTTOM</button>
 </div>
 </div>
-<div id="list"><div class="empty">Loading channels...</div></div>
-<div id="stats">Loading status...</div>
+<div id="list"><div class="empty">INITIALIZING STREAM MATRIX...</div></div>
+<div id="stats">SYNCING NODE NETWORK...</div>
 </aside>
 <div class="player">
+<div class="glass-card" style="position:absolute;top:16px;left:16px;z-index:10;padding:12px 20px;border-radius:12px">
+<span id="channelStatus" style="color:var(--neon-lime);font-family:var(--font-mono);font-size:0.85rem">● IDLE</span>
+</div>
 <video id="video" controls autoplay playsinline></video>
-<div class="info" id="info">Select a channel</div>
+<div class="info" id="info">
+<h2>SELECT A CHANNEL</h2>
+<p>Pick from the neon stream matrix. Tap for instant playback.</p>
+</div>
 </div>
 </main>
+<nav class="bottom-nav">
+<ul>
+<li><a href="#" class="active"><span class="icon">📺</span><span class="label">Live</span></a></li>
+<li><a href="#" id="navSearch"><span class="icon">⌕</span><span class="label">Search</span></a></li>
+<li><a href="#" id="navFavs"><span class="icon">⭐</span><span class="label">Favs</span></a></li>
+<li><a href="#" id="navMore"><span class="icon">⚙</span><span class="label">More</span></a></li>
+</ul>
+</nav>
 <script src="app.js"></script>
 </body>
 </html>
