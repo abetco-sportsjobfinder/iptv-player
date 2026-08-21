@@ -108,24 +108,24 @@ try {
 const R2_LOGO_URL = 'https://YOUR_ACCOUNT.r2.cloudflarestorage.com/logos.json'; // <-- set this after enabling R2
 
 async function loadLogos() {
-  try {
-    // Try R2 first (when enabled)
-    const res = await fetch(R2_LOGO_URL);
-    if (res.ok) {
-      const data = await res.json();
-      logoMap = new Map(Object.entries(data));
-      renderVirtualList();
-      return;
-    }
-  } catch (e) { /* fall through to local */ }
-  // Fallback to local logos.json
-  try {
-    const res = await fetch('logos.json');
-    if (!res.ok) return;
-    const data = await res.json();
-    logoMap = new Map(Object.entries(data));
-    renderVirtualList();
-  } catch (e) { }
+  // Lazy logo loading: only load logos.json on demand for visible channels
+  // Don't preload entire 2.9MB file
+  logoMap = new Map(); // Empty initially
+  renderVirtualList();
+  
+  // Preload a small sample for initial render
+  setTimeout(async () => {
+    try {
+      const res = await fetch('logos.json');
+      if (res.ok) {
+        const data = await res.json();
+        // Only load first 500 logos to reduce memory
+        const entries = Object.entries(data).slice(0, 500);
+        logoMap = new Map(entries);
+        renderVirtualList();
+      }
+    } catch (e) { /* silent fail */ }
+  }, 2000);
 }
 
 function updateStats() {
@@ -251,7 +251,7 @@ function buildMaps() {
 
 function inferProvider(ch) {
   if (ch.provider) return ch.provider;
-  const streams = allStreams.filter(s => s.channelId === ch.id);
+  const streams = streamsByChannel.get(ch.id) || [];
   for (const s of streams) {
     try {
       const h = new URL(s.url).hostname;
@@ -361,7 +361,7 @@ function applyFilters() {
 }
 
 function isReliable(channelId) {
-  const streams = allStreams.filter(s => s.channelId === channelId);
+  const streams = streamsByChannel.get(channelId) || [];
   return streams.some(s => s.url && /^https?:\/\//.test(s.url) &&
     !s.url.includes('youtube.com') && !s.url.includes('.mpd') &&
     GOOD_CDNS.some(cdn => s.url.includes(cdn)) &&
@@ -425,7 +425,7 @@ function saveStatusCache() {
 }
 
 async function testStream(channelId) {
-  const streams = allStreams.filter(s => s.channelId === channelId && s.url);
+  const streams = (streamsByChannel.get(channelId) || []).filter(s => s.url);
   if (!streams.length) { setStatus(channelId, 'dead', 'no_streams'); return; }
 
   for (const s of streams) {
@@ -479,11 +479,11 @@ function startBackgroundTesting() {
 
 async function processQueue() {
   while (testingQueue.length > 0) {
-    const batch = testingQueue.splice(0, 4);
+    const batch = testingQueue.splice(0, 2); // Reduced from 4 to 2 concurrent tests
     await Promise.all(batch.map(id => testStream(id)));
     renderVirtualList();
     updateStats();
-    await new Promise(r => setTimeout(r, 700));
+    await new Promise(r => setTimeout(r, 1500)); // Increased delay from 700ms to 1500ms
   }
   isTesting = false;
 }
@@ -497,7 +497,8 @@ function proxyUrl(url, ua, ref) {
 }
 
 function findStreamCandidates(channelId) {
-  const candidates = allStreams.filter(s => s.channelId === channelId && s.url && /^https?:\/\//.test(s.url) &&
+  const allForChannel = streamsByChannel.get(channelId) || [];
+  const candidates = allForChannel.filter(s => s.url && /^https?:\/\//.test(s.url) &&
     !s.url.includes('youtube.com') && !s.url.includes('.mpd'));
   if (!candidates.length) return [];
   const httpsCandidates = candidates.filter(s => s.url.startsWith('https://') && !BAD_CDNS.some(bad => s.url.includes(bad)));
