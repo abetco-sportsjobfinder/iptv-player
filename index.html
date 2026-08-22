@@ -15,7 +15,20 @@
 <header>
 <button id="sidebarToggle" title="Toggle channel list">☰</button>
 <h1>NEON STREAM</h1>
+<div class="brand-controls" style="display:flex;align-items:center;gap:12px;margin-left:12px">
+  <span style="color:var(--neon-cyan);font-weight:700;font-size:0.9rem">NEON STREAM</span>
+  <select id="themeSelect" style="padding:6px 10px;border-radius:6px;border:1px solid var(--border-glow);background:var(--bg-glass);color:var(--text-primary);font-size:0.75rem">
+    <option value="default">Default</option>
+    <option value="ocean">Ocean</option>
+    <option value="purple">Purple</option>
+    <option value="forest">Forest</option>
+  </select>
+</div>
 <button id="simpleModeToggle" class="glass-button" style="margin-left:auto;padding:8px 16px;font-size:0.85rem">Simple Mode</button>
+<div class="window-controls" style="display:flex;align-items:center;gap:8px;margin-left:12px">
+  <button id="newWindowBtn" class="glass-button" style="padding:4px 8px;font-size:0.75rem">+ Window</button>
+  <span id="windowCount" style="color:var(--neon-cyan);font-size:0.75rem">1W</span>
+</div>
 </header>
 <main>
 <aside id="sidebar">
@@ -23,20 +36,29 @@
 <input id="search" placeholder="⌕ SEARCH CHANNELS..." autocomplete="off" />
 <button id="quickCategories" class="glass-button" style="width:100%">🎯 Quick Categories</button>
 <select id="country">
-<option value="">🌍 All Countries</option>
+<option value="">�? All Countries</option>
 </select>
 <select id="provider">
 <option value="">📡 All Providers</option>
 </select>
 <div id="simpleFilters" style="display:flex;flex-direction:column;gap:10px">
-<label><input type="checkbox" id="favToggle" autocomplete="off"> ⭐ Favorites Only</label>
+<label><input type="checkbox" id="favToggle" autocomplete="off"> �? Favorites Only</label>
 <label><input type="checkbox" id="reliableToggle" autocomplete="off"> ⚡ Reliable Only</label>
 <label><input type="checkbox" id="workingToggle" autocomplete="off"> ✅ Tested Working</label>
 </div>
 <div id="sourceToggles" style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px"></div>
+<div id="windowManager" style="margin-top:8px;padding:8px;border:1px solid var(--neon-cyan);border-radius:8;background:rgba(0,255,255,0.05);display:none">
+  <div style="font-size:0.75rem;color:var(--neon-cyan);margin-bottom:4">Active Windows:</div>
+  <div id="windowList" style="height:120px;overflow-y:auto;margin-top:4"></div>
+  <div style="margin-top:4;display:flex;justify-content:space-between;font-size:0.7rem">
+    <span>Sync Filters: <input type="checkbox" id="filterSync" checked></span>
+    <button id="collapseWindows" style="margin-left:8;padding:2px 6"> collapse </button>
+  </div>
+</div>
 <div class="jump">
 <button id="topBtn">↑ TOP</button>
 <button id="bottomBtn">↓ BOTTOM</button>
+</div>
 </div>
 </div>
 <div id="list"><div class="empty">INITIALIZING STREAM MATRIX...</div></div>
@@ -44,7 +66,7 @@
 </aside>
 <div class="player">
 <div class="glass-card" style="position:absolute;top:16px;left:16px;z-index:10;padding:12px 20px;border-radius:12px">
-<span id="channelStatus" style="color:var(--neon-lime);font-family:var(--font-mono);font-size:0.85rem">● IDLE</span>
+<span id="channelStatus" style="color:var(--neon-lime);font-family:var(--font-mono);font-size:0.85rem">�? IDLE</span>
 </div>
 <video id="video" controls autoplay playsinline></video>
 <div class="info" id="info">
@@ -57,7 +79,7 @@
 <ul>
 <li><a href="#" class="active"><span class="icon">📺</span><span class="label">Live</span></a></li>
 <li><a href="#" id="navSearch"><span class="icon">⌕</span><span class="label">Search</span></a></li>
-<li><a href="#" id="navFavs"><span class="icon">⭐</span><span class="label">Favs</span></a></li>
+<li><a href="#" id="navFavs"><span class="icon">�?</span><span class="label">Favs</span></a></li>
 <li><a href="#" id="navMore"><span class="icon">⚙</span><span class="label">More</span></a></li>
 </ul>
 </nav>

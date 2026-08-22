@@ -37,7 +37,73 @@ let filteredChannels = [];
 let renderWindow = {start: 0, end: 0};
 let activeSources = new Set(Object.keys(SOURCES).filter(k => SOURCES[k].enabled));
 let channelRank = new Map();
+let channelReliable = new Map(); // Cache: channelId -> boolean (reliable has good CDN)
 let logoMap = new Map();
+// Multi-window system: each window has its own filter state and filtered channels
+let windowManager = {
+  windows: [], // Array of {id, filterState, filteredChannels, element}
+  nextId: 1,
+  // Create a new window with given filter state (or default all-visible)
+  createWindow: function(initialFilterState = null) {
+    const id = `window-${this.nextId++}`;
+    // Default filter state: show all channels (no filters active)
+    const defaultState = {
+      query: '',
+      country: '',
+      provider: '',
+      showFavsOnly: false,
+      reliableOnly: false,
+      workingOnly: false
+    };
+    const state = initialFilterState ? { ...defaultState, ...initialFilterState } : defaultState;
+    // Initial filtered channels = all channels with no filters
+    const initialChannels = this._applyFiltersToChannels(allChannels, state);
+    const window = {
+      id,
+      filterState: state,
+      filteredChannels: initialChannels,
+      element: null // Will be set when DOM element is created
+    };
+    this.windows.push(window);
+    return window;
+  },
+  // Apply filter state to a channels array
+  _applyFiltersToChannels: function(channels, filterState) {
+    const q = filterState.query.toLowerCase();
+    return channels.filter(c => {
+      // Check active sources
+      if (!activeSources.has(c.source)) return false;
+      // Check favorites only
+      if (filterState.showFavsOnly && !favorites.has(c.id)) return false;
+      // Check country
+      if (filterState.country && c.country !== filterState.country) return false;
+      // Check provider
+      if (filterState.provider && c.provider !== filterState.provider) return false;
+      // Check reliable only
+      if (filterState.reliableOnly && !channelReliable.get(c.id)) return false;
+      // Check working only
+      if (filterState.workingOnly && getStatus(c.id) !== 'working') return false;
+      // Check name/search match
+      const nameMatch = nameLowerCache.get(c.id).includes(q) || (c.altNames || []).some(a => a.toLowerCase().includes(q));
+      return nameMatch;
+    });
+  },
+  // Remove a window by ID
+  removeWindow: function(id) {
+    this.windows = this.windows.filter(w => w.id !== id);
+  },
+  // Get all filtered channels across all windows (for rendering choice)
+  getAllFiltered: function() {
+    return this.windows.map(w => w.filteredChannels).flat();
+  },
+  // Sync filter state across all windows (when toggles change)
+  syncFilters: function(newFilterState) {
+    this.windows.forEach(window => {
+      window.filterState = { ...window.filterState, ...newFilterState };
+      window.filteredChannels = this._applyFiltersToChannels(allChannels, window.filterState);
+    });
+  }
+};
 let testingQueue = [];
 let isTesting = false;
 let statusSaveTimer = null;
@@ -61,6 +127,139 @@ const BUFFER = 10;
 const GOOD_CDNS = ['cloudfront.net', 'akamaized.net', 'akamaihd.net', 'amagi.tv', 'wurl.tv', 'tubi.video', 'pb-', 'aegis-cloudfront', 'airspace-cdn', 'fastly.net', 'd1m1xk35ma8qfl.cloudfront.net', 'pluto.tv'];
 const BAD_CDNS = ['jmp2.uk', 'messi.damitv.st'];
 const STATUS_TTL = 7 * 24 * 60 * 60 * 1000;
+
+// Category display names mapping (from categories array to human-readable labels)
+const CATEGORY_LABELS = {
+  'Kids': '👶 Kids',
+  'News': '📰 News', 
+  'Sports': '⚽ Sports',
+  'Movies': '🎬 Movies',
+  'Music': '🎵 Music',
+  'Children': '👶 Children',
+  'Entertainment': '🎭 Entertainment',
+  'Documentary': '📖 Documentary',
+  'Family': '👨�� Family',
+  'Lifestyle': '🧭 Lifestyle'
+};
+
+// Provider display names mapping
+const PROVIDER_LABELS = {
+  'IPTV-org': 'IPTV-org',
+  'Pluto TV': 'Pluto TV',
+  'Samsung TV Plus': 'Samsung TV Plus',
+  'Amagi': 'Amagi',
+  'Wurl': 'Wurl',
+  'Tubi': 'Tubi',
+  '': 'Unknown'
+};
+
+// Group channels by provider for sidebar grouping
+function getProviderGroup(c) {
+  return PROVIDER_LABELS[c.provider] || c.provider || 'Unknown';
+}
+
+// Get category badges for a channel
+function getCategoryBadges(c) {
+  if (!c.categories || c.categories.length === 0) return [];
+  return c.categories
+    .filter(cat => CATEGORY_LABELS[cat])
+    .map(cat => CATEGORY_LABELS[cat])
+    .slice(0, 3); // Max 3 badges per channel
+}
+
+// Initialize category badges cache (called in buildMaps or load)
+function initCategorySystem() {
+  // Category system is computed on-the-fly in render, no persistent cache needed
+}
+
+// Expanded groups state: set of "provider|category" keys that are expanded
+let expandedGroups = new Set();
+
+// Load expanded groups state from localStorage on initialization
+try {
+  const stored = localStorage.getItem('iptv_expanded_groups');
+  if (stored) {
+    expandedGroups = new Set(JSON.parse(stored));
+  }
+} catch (e) {}
+
+// Get category display name for a category key
+function getCategoryDisplay(catKey) {
+  return CATEGORY_LABELS[catKey] || catKey;
+}
+
+// Get all categories for a channel
+function getChannelCategories(c) {
+  if (!c.categories || c.categories.length === 0) return [];
+  return c.categories.filter(cat => CATEGORY_LABELS[cat]);
+}
+
+// Get hierarchical group key for a channel+category
+function getGroupKey(c, category) {
+  if (!c) return `${category}`;
+  return `${c.provider}|${category}`;
+}
+
+// Toggle group expansion (provider or category level)
+function toggleGroup(groupKey) {
+  if (expandedGroups.has(groupKey)) {
+    expandedGroups.delete(groupKey);
+  } else {
+    expandedGroups.add(groupKey);
+  }
+  try {
+    localStorage.setItem('iptv_expanded_groups', JSON.stringify(Array.from(expandedGroups)));
+  } catch (e) {}
+  return !expandedGroups.has(groupKey);
+}
+
+// Build hierarchical grouping of channels by provider and category
+function getGroupedChannels(filteredChannels) {
+  const providerMap = new Map();
+  for (const c of filteredChannels) {
+    const provider = getProviderGroup(c);
+    if (!providerMap.has(provider)) {
+      providerMap.set(provider, []);
+    }
+    providerMap.get(provider).push(c);
+  }
+  const hierarchy = [];
+  const sortedProviders = Array.from(providerMap.keys()).sort();
+  for (const provider of sortedProviders) {
+    const channels = providerMap.get(provider);
+    const categoryMap = new Map();
+    for (const c of channels) {
+      const categories = getChannelCategories(c);
+      const primaryCat = categories.length > 0 ? categories[0] : 'general';
+      if (!categoryMap.has(primaryCat)) {
+        categoryMap.set(primaryCat, []);
+      }
+      categoryMap.get(primaryCat).push(c);
+    }
+    const providerEntry = {
+      provider,
+      channels,
+      categoryMap,
+      expanded: expandedGroups.has(provider),
+      toggle: () => toggleGroup(provider),
+    };
+    const categories = [];
+    const sortedCategories = Array.from(categoryMap.keys()).sort();
+    for (const cat of sortedCategories) {
+      const catChannels = categoryMap.get(cat);
+      categories.push({
+        category: cat,
+        label: getCategoryDisplay(cat),
+        channels: catChannels,
+        expanded: expandedGroups.has(channels[0] ? getGroupKey(channels[0], cat) : provider),
+        toggle: () => toggleGroup(channels[0] ? getGroupKey(channels[0], cat) : provider),
+      });
+    }
+    providerEntry.categories = categories;
+    hierarchy.push(providerEntry);
+  }
+  return hierarchy;
+}
 
 async function load() {
   const cached = loadStatusCache();
@@ -94,10 +293,8 @@ try {
       favorites = kvFavs;
     }
   } catch (e) { }
-  // Explicitly uncheck filter toggles to prevent browser restoring checked state
-  document.getElementById('favToggle').checked = false;
-  document.getElementById('reliableToggle').checked = false;
-  document.getElementById('workingToggle').checked = false;
+  // No longer unconditionally reset user filters on startup
+  // Apply filters with current state
   applyFilters();
   updateStats();
   loadLogos();
@@ -139,7 +336,7 @@ function updateStats() {
   }
   const total = allChannels.filter(c => (channelRank.get(c.id) ?? 2) < 2).length;
   if (simpleMode) {
-    el.textContent = `● ${w.toLocaleString()} LIVE • ${filteredChannels.length.toLocaleString()} SHOWS`;
+    el.textContent = `�? ${w.toLocaleString()} LIVE • ${filteredChannels.length.toLocaleString()} SHOWS`;
   } else {
     el.textContent = `🟢 ${w.toLocaleString()} working • 🔴 ${d.toLocaleString()} dead • ⚪ ${(total - w - d).toLocaleString()} untested • ${total.toLocaleString()} with streams`;
   }
@@ -242,7 +439,9 @@ function parseExtinf(line) {
 function buildMaps() {
   channelMap.clear();
   countries.clear();
+  nameLowerCache = new Map(); // New: lowercase name cache for filtering
   allChannels.forEach(c => {
+    nameLowerCache.set(c.id, c.name.toLowerCase());
     channelMap.set(c.id, c);
     if (c.country) countries.add(c.country);
   });
@@ -275,6 +474,7 @@ function inferProvider(ch) {
 
 function computeRanks() {
   channelRank = new Map();
+  channelReliable = new Map(); // Reset cache
   const byChannel = new Map();
   for (const s of allStreams) {
     if (!s.url || !/^https?:\/\//.test(s.url)) continue;
@@ -288,6 +488,8 @@ function computeRanks() {
     if (streams.length) rank = 1;
     if (streams.some(s => GOOD_CDNS.some(cdn => s.url.includes(cdn)) && !BAD_CDNS.some(bad => s.url.includes(bad)))) rank = 0;
     channelRank.set(c.id, rank);
+    // Cache reliability: has good CDN stream without bad CDNs
+    channelReliable.set(c.id, streams.some(s => GOOD_CDNS.some(cdn => s.url.includes(cdn)) && !BAD_CDNS.some(bad => s.url.includes(bad))));
   });
   allChannels.sort((a, b) => (channelRank.get(a.id) ?? 2) - (channelRank.get(b.id) ?? 2));
 }
@@ -339,26 +541,123 @@ function setupSourceToggles() {
 }
 
 function applyFilters() {
-  const q = document.getElementById('search').value.toLowerCase();
-  const country = document.getElementById('country').value;
-  const provider = document.getElementById('provider').value;
-  const showFavsOnly = document.getElementById('favToggle').checked;
-  const reliableOnly = document.getElementById('reliableToggle').checked;
-  const workingOnly = document.getElementById('workingToggle').checked;
-
-  filteredChannels = allChannels.filter(c => {
-    if (!activeSources.has(c.source)) return false;
-    if (showFavsOnly && !favorites.has(c.id)) return false;
-    if (country && c.country !== country) return false;
-    if (provider && c.provider !== provider) return false;
-    if (reliableOnly && !isReliable(c.id)) return false;
-    if (workingOnly && getStatus(c.id) !== 'working') return false;
-    const nameMatch = c.name.toLowerCase().includes(q) || (c.altNames || []).some(a => a.toLowerCase().includes(q));
-    return nameMatch;
-  });
-  renderWindow = {start: 0, end: 0};
-  renderVirtualList();
+  // Use the first window's filter state, or create a default if no windows exist
+  if (windowManager.windows.length === 0) {
+    // No windows exist yet - create one and apply filters
+    const window = windowManager.createWindow();
+    // Apply the filter changes from DOM controls to this window
+    applyFiltersToWindow(window.id);
+    return;
+  }
+  // Apply filters to the first window (primary window)
+  applyFiltersToWindow(windowManager.windows[0].id);
+  // Optionally sync other windows - for now, only update primary
+  // Start background testing to classify channel statuses
+  startBackgroundTesting();
 }
+
+function applyFiltersToWindow(windowId) {
+  const window = windowManager.windows.find(w => w.id === windowId);
+  if (!window) return;
+  
+  // Use this window's filter state (preserving per-window differences)
+  // instead of reading global DOM inputs every time
+  window.filteredChannels = window._applyFiltersToChannels(allChannels, window.filterState);
+  
+  // Re-render this window
+  renderVirtualListForWindow(window);
+  
+  // Also update stats for this window
+  updateStatsForWindow(window);
+}
+
+// Initialize: create the default window when load() runs (or on first applyFilters)
+windowManager.createWindow();
+
+// Add window button handler
+document.getElementById('newWindowBtn').addEventListener('click', () => {
+  const newWindow = windowManager.createWindow();
+  renderWindowUI();
+  // Auto-focus the search in the new window? For now, just re-apply filters
+  applyFilters();
+});
+
+// Window list renderer
+function renderWindowUI() {
+  const windowCountEl = document.getElementById('windowCount');
+  const windowListEl = document.getElementById('windowList');
+  const filterSyncEl = document.getElementById('filterSync');
+  
+  if (windowManager.windows.length === 0) {
+    windowCountEl.textContent = '0W';
+    windowListEl.innerHTML = '<div style="padding:8px">No windows active</div>';
+    windowManager.windows[0] = windowManager.createWindow(); // ensure at least one
+  }
+  
+  windowCountEl.textContent = `${windowManager.windows.length}W`;
+  
+  // Render window thumbnails/items
+  windowListEl.innerHTML = windowManager.windows.map((w, i) => {
+    const isPrimary = i === 0;
+    const syncChecked = isPrimary ? 'checked' : '';
+    return `<div style="padding:6px;margin:2px;border:1px solid var(--neon-cyan);border-radius:4;background:rgba(0,255,255,0.03);cursor:pointer;
+              ${isPrimary ? 'border-width:2px' : 'border-width:1px'}' 
+              data-window-id="${w.id}"'>
+      <input type="checkbox" ${syncChecked} style="margin-right:4" id="windowSync-${w.id}">
+      <span style="cursor:pointer">${w.id.replace('window-', '')}</span>
+      <button style="margin-left:4;padding:1px 4;font-size:0.65rem;cursor:pointer">×</button>
+    </div>`;
+  }).join('');
+  
+  // Clean up existing window click handlers to prevent accumulation
+  const prevHandler = document._windowClickHandler;
+  if (prevHandler) {
+    document.querySelectorAll('[data-window-id]').forEach(el => {
+      el.removeEventListener('click', prevHandler);
+    });
+  }
+  
+  // Add click handlers for window items
+  const clickHandler = (e) => {
+    const el = e.target.closest('[data-window-id]');
+    if (!el) return;
+    const winId = el.dataset.windowId;
+    const win = windowManager.windows.find(w => w.id === winId);
+    if (win) {
+      windowManager.windows.splice(windowManager.windows.indexOf(win), 1);
+      windowManager.windows.push(win);
+      renderWindowUI();
+      applyFilters();
+    }
+  };
+  document._windowClickHandler = clickHandler;
+  document.querySelectorAll('[data-window-id]').forEach(el => {
+    el.addEventListener('click', clickHandler);
+  });
+  
+  // Filter sync handler
+  filterSyncEl.onchange = () => {
+    const allChecked = Array.from(document.querySelectorAll('#windowManager input[type=checkbox]')).every(c => c.checked);
+    windowManager.syncFilters({
+      query: document.getElementById('search').value.toLowerCase(),
+      country: document.getElementById('country').value,
+      provider: document.getElementById('provider').value,
+      showFavsOnly: document.getElementById('favToggle').checked,
+      reliableOnly: document.getElementById('reliableToggle').checked,
+      workingOnly: document.getElementById('workingToggle').checked
+    });
+  };
+  
+  // Collapse/expand handler
+  const collapseBtn = document.getElementById('collapseWindows');
+  collapseBtn.onclick = () => {
+    const wm = document.getElementById('windowManager');
+    wm.style.display = wm.style.display === 'none' ? 'block' : 'none';
+  };
+}
+
+// Initial render
+renderWindowUI();
 
 function isReliable(channelId) {
   const streams = streamsByChannel.get(channelId) || [];
@@ -472,7 +771,8 @@ function startBackgroundTesting() {
   if (isTesting) return;
   isTesting = true;
   testingQueue = allChannels
-    .filter(c => (channelRank.get(c.id) ?? 2) < 2 && getStatus(c.id) === 'unknown')
+    .filter(c => getStatus(c.id) === 'unknown')
+    .sort((a, b) => (channelRank.get(a.id) ?? 2) - (channelRank.get(b.id) ?? 2))
     .map(c => c.id);
   processQueue();
 }
@@ -482,7 +782,7 @@ async function processQueue() {
     const batch = testingQueue.splice(0, 2); // Reduced from 4 to 2 concurrent tests
     await Promise.all(batch.map(id => testStream(id)));
     renderVirtualList();
-    updateStats();
+    updateStatsForWindow(windowManager.windows[0]);
     await new Promise(r => setTimeout(r, 1500)); // Increased delay from 700ms to 1500ms
   }
   isTesting = false;
@@ -643,7 +943,22 @@ function renderVirtualList() {
   if (renderWindow.start === newStart && renderWindow.end === newEnd && list.children.length > 0) return;
   renderWindow = {start: newStart, end: newEnd};
 
-  const totalHeight = totalItems * ITEM_HEIGHT;
+  if (filteredChannels.length === 0) {
+    list.innerHTML = '<div class="empty">No channels match</div>';
+    list.style.height = '100px';
+    list.style.position = 'relative';
+    if (afterHeight > 0) {
+      const spacer = document.createElement('div');
+      spacer.className = 'list-placeholder';
+      spacer.style.height = afterHeight + 'px';
+      list.appendChild(spacer);
+    }
+    return;
+  }
+
+  const hierarchy = getGroupedChannels(filteredChannels);
+  
+  const totalHeight = filteredChannels.length * ITEM_HEIGHT;
   const beforeHeight = newStart * ITEM_HEIGHT;
   const afterHeight = totalHeight - newEnd * ITEM_HEIGHT;
 
@@ -659,45 +974,104 @@ function renderVirtualList() {
   }
 
   const fragment = document.createDocumentFragment();
-  for (let i = newStart; i < newEnd; i++) {
-    const c = filteredChannels[i];
-    const isBlocked = blocklist.has(c.id);
-    const reason = blocklist.get(c.id);
-    const isFav = favorites.has(c.id);
-    const status = getStatus(c.id);
-    const statusClass = status === 'working' ? 'status-ok' : status === 'dead' ? 'status-dead' : status === 'testing' ? 'status-testing' : '';
-    const statusIcon = status === 'working' ? '🟢' : status === 'dead' ? '🔴' : status === 'testing' ? '🟡' : '⚪';
 
-    const div = document.createElement('div');
-    const rank = channelRank.get(c.id) ?? 2;
-    div.className = 'channel' + (isBlocked ? ' blocked' : '') + (rank === 2 ? ' nostream' : '');
-    div.dataset.id = c.id;
-    div.style.height = ITEM_HEIGHT + 'px';
-    div.style.display = 'flex';
-    div.style.alignItems = 'center';
-    const logoUrl = c.logo || logoMap.get(c.id) || '';
-    const logoHtml = logoUrl
-      ? `<img class="logo" src="${logoUrl}" loading="lazy" onerror="this.style.display='none'">`
-      : `<span class="logo logo-fallback">${(c.name[0] || '?').toUpperCase()}</span>`;
+  for (const providerEntry of hierarchy) {
+    // Provider header with toggle
+    const providerHeader = document.createElement('div');
+    providerHeader.className = 'provider-group-header';
+    providerHeader.style.cssText = 'padding: 4px 8px; background: rgba(0,255,255,0.03); border: 1px solid var(--border-glow); border-radius: 4px; margin: 4px 0; cursor: pointer; display: flex; justify-content: space-between; align-items: center;';
     
-    const metaParts = simpleMode 
-      ? [c.provider].filter(Boolean)
-      : [c.provider, countryFlag(c.country) + ' ' + c.country, (c.categories || []).join(', ')];
+    const headerText = document.createElement('span');
+    headerText.style.color = 'var(--neon-cyan)';
+    headerText.style.fontWeight = '700';
+    headerText.style.fontSize = '0.75rem';
+    headerText.textContent = `${providerEntry.provider} ${providerEntry.expanded ? '▼' : '▶'}`;
     
-    div.innerHTML = `<span class="status-badge ${statusClass}">${statusIcon}</span>${logoHtml}<button class="fav-btn" data-id="${c.id}" title="Toggle favorite">${isFav ? '★' : '☆'}</button><div class="channel-info"><div class="name">${c.name}</div><div class="meta">${metaParts.filter(Boolean).join(' • ')}${isBlocked ? ` • BLOCKED` : ''}</div></div>`;
-    div.onclick = (e) => {
-      if (e.target.classList.contains('fav-btn')) {
-        const id = e.target.dataset.id;
-        if (favorites.has(id)) favorites.delete(id); else favorites.add(id);
-        scheduleFavoriteFlush();
-        applyFilters();
-      } else {
-        selectChannel(c.id, div);
-      }
+    const toggleBtn = document.createElement('button');
+    toggleBtn.style.background = 'transparent';
+    toggleBtn.style.border = 'none';
+    toggleBtn.style.color = 'var(--neon-cyan)';
+    toggleBtn.style.cursor = 'pointer';
+    toggleBtn.style.fontSize = '0.65rem';
+    toggleBtn.textContent = '+';
+    toggleBtn.onclick = (e) => {
+      e.stopPropagation();
+      const nowExpanded = providerEntry.toggle();
+      headerText.textContent = `${providerEntry.provider} ${nowExpanded ? '▼' : '▶'}`;
     };
-    fragment.appendChild(div);
+    
+    providerHeader.appendChild(headerText);
+    providerHeader.appendChild(toggleBtn);
+    fragment.appendChild(providerHeader);
+
+    // Category sub-sections within provider (only if expanded)
+    if (providerEntry.expanded) {
+      for (const catEntry of providerEntry.categories) {
+        // Category header with toggle
+        const catHeader = document.createElement('div');
+        catHeader.style.cssText = 'padding: 2px 6px; background: rgba(0,255,255,0.02); border-bottom: 1px solid var(--border-glow); border-radius: 0 0 4px 4; margin: 2px 0; cursor: pointer; font-size: 0.65rem; color: var(--text-secondary);';
+        
+        const catLabel = document.createElement('span');
+        catLabel.textContent = catEntry.label;
+        
+        const catToggle = document.createElement('button');
+        catToggle.style.background = 'transparent';
+        catToggle.style.border = 'none';
+        catToggle.style.color = 'var(--neon-cyan)';
+        catToggle.style.cursor = 'pointer';
+        catToggle.style.fontSize = '0.65rem';
+        catToggle.textContent = catEntry.expanded ? '−' : '+';
+        catToggle.onclick = (e) => {
+          e.stopPropagation();
+          const nowExpanded = catEntry.toggle();
+          catToggle.textContent = nowExpanded ? '−' : '+';
+        };
+        
+        catHeader.appendChild(catLabel);
+        catHeader.appendChild(catToggle);
+        fragment.appendChild(catHeader);
+
+        // Channels in this category
+        for (const c of catEntry.channels) {
+          const isBlocked = blocklist.has(c.id);
+          const reason = blocklist.get(c.id);
+          const isFav = favorites.has(c.id);
+          const status = getStatus(c.id);
+          const statusClass = status === 'working' ? 'status-ok' : status === 'dead' ? 'status-dead' : status === 'testing' ? 'status-testing' : '';
+          const statusIcon = status === 'working' ? '🟢' : status === 'dead' ? '🔴' : status === 'testing' ? '🟡' : '⚪';
+          
+          const rank = channelRank.get(c.id) ?? 2;
+          const div = document.createElement('div');
+          div.className = 'channel' + (isBlocked ? ' blocked' : '') + (rank === 2 ? ' nostream' : '');
+          div.dataset.id = c.id;
+          div.style.height = ITEM_HEIGHT + 'px';
+          div.style.display = 'flex';
+          div.style.alignItems = 'center';
+          div.style.justifyContent = 'space-between';
+          
+          const logoUrl = c.logo || logoMap.get(c.id) || '';
+          const logoHtml = logoUrl
+            ? `<img class="logo" src="${logoUrl}" loading="lazy" onerror="this.style.display='none'">`
+            : `<span class="logo logo-fallback">${(c.name[0] || '?').toUpperCase()}</span>`;
+          
+          const metaParts = [c.provider, countryFlag(c.country) + ' ' + c.country, (c.categories || []).join(', ')].filter(Boolean).join(' • ');
+          
+          div.innerHTML = `<span class="status-badge ${statusClass}">${statusIcon}</span>${logoHtml}<button class="fav-btn" data-id="${c.id}" title="Toggle favorite">${isFav ? '★' : '☆'}</button><div class="channel-info"><div class="name">${c.name}</div><div class="meta">${metaParts}${isBlocked ? ` • BLOCKED` : ''}</div></div>`;
+          div.onclick = (e) => {
+            if (e.target.classList.contains('fav-btn')) {
+              const id = e.target.dataset.id;
+              if (favorites.has(id)) favorites.delete(id); else favorites.add(id);
+              scheduleFavoriteFlush();
+              applyFilters();
+            } else {
+              selectChannel(c.id, div);
+            }
+          };
+          fragment.appendChild(div);
+        }
+      }
+    }
   }
-  list.appendChild(fragment);
 
   if (afterHeight > 0) {
     const spacer = document.createElement('div');
@@ -707,7 +1081,150 @@ function renderVirtualList() {
   }
 }
 
-document.getElementById('search').addEventListener('input', () => { clearTimeout(searchDebounce); searchDebounce = setTimeout(applyFilters, 150); });
+// NEW: Render virtual list for a specific window's filtered channels
+function renderVirtualListForWindow(window) {
+  const list = window.element ? document.getElementById(`window-list-${window.id}`) : document.getElementById('list');
+  const hierarchy = window ? getGroupedChannels(window.filteredChannels) : getGroupedChannels(filteredChannels);
+  
+  if (window) {
+    list = document.getElementById(`window-list-${window.id}`) || list;
+  }
+  
+  list.innerHTML = '';
+  const totalHeight = window ? window.filteredChannels.length * ITEM_HEIGHT : filteredChannels.length * ITEM_HEIGHT;
+  list.style.height = totalHeight + 'px';
+  list.style.position = 'relative';
+
+  const visibleStart = list ? list.scrollTop / ITEM_HEIGHT : 0;
+  const visibleCount = list ? list.clientHeight / ITEM_HEIGHT : 0;
+  const newStart = Math.max(0, Math.floor(visibleStart - BUFFER));
+  const newEnd = Math.min((window ? window.filteredChannels.length : filteredChannels.length), Math.floor(visibleStart + visibleCount + BUFFER));
+
+  if (renderWindow.start === newStart && renderWindow.end === newEnd && (list?.children?.length > 0)) return;
+  renderWindow = {start: newStart, end: newEnd};
+
+  const beforeHeight = newStart * ITEM_HEIGHT;
+  const afterHeight = totalHeight - newEnd * ITEM_HEIGHT;
+
+  if (beforeHeight > 0) {
+    const spacer = document.createElement('div');
+    spacer.className = 'list-placeholder';
+    spacer.style.height = beforeHeight + 'px';
+    list.appendChild(spacer);
+  }
+
+  const fragment = document.createDocumentFragment();
+
+  for (const providerEntry of hierarchy) {
+    // Provider header with toggle
+    const providerHeader = document.createElement('div');
+    providerHeader.className = 'provider-group-header';
+    providerHeader.style.cssText = 'padding: 4px 8px; background: rgba(0,255,255,0.03); border: 1px solid var(--border-glow); border-radius: 4px; margin: 4px 0; cursor: pointer; display: flex; justify-content: space-between; align-items: center;';
+    
+    const headerText = document.createElement('span');
+    headerText.style.color = 'var(--neon-cyan)';
+    headerText.style.fontWeight = '700';
+    headerText.style.fontSize = '0.75rem';
+    headerText.textContent = `${providerEntry.provider} ${providerEntry.expanded ? '▼' : '▶'}`;
+    
+    const toggleBtn = document.createElement('button');
+    toggleBtn.style.background = 'transparent';
+    toggleBtn.style.border = 'none';
+    toggleBtn.style.color = 'var(--neon-cyan)';
+    toggleBtn.style.cursor = 'pointer';
+    toggleBtn.style.fontSize = '0.65rem';
+    toggleBtn.textContent = '+';
+    toggleBtn.onclick = (e) => {
+      e.stopPropagation();
+      const nowExpanded = providerEntry.toggle();
+      headerText.textContent = `${providerEntry.provider} ${nowExpanded ? '▼' : '▶'}`;
+    };
+    
+    providerHeader.appendChild(headerText);
+    providerHeader.appendChild(toggleBtn);
+    fragment.appendChild(providerHeader);
+
+    // Category sub-sections within provider (only if expanded)
+    if (providerEntry.expanded) {
+      for (const catEntry of providerEntry.categories) {
+        // Category header with toggle
+        const catHeader = document.createElement('div');
+        catHeader.style.cssText = 'padding: 2px 6px; background: rgba(0,255,255,0.02); border-bottom: 1px solid var(--border-glow); border-radius: 0 0 4px 4; margin: 2px 0; cursor: pointer; font-size: 0.65rem; color: var(--text-secondary);';
+        
+        const catLabel = document.createElement('span');
+        catLabel.textContent = catEntry.label;
+        
+        const catToggle = document.createElement('button');
+        catToggle.style.background = 'transparent';
+        catToggle.style.border = 'none';
+        catToggle.style.color = 'var(--neon-cyan)';
+        catToggle.style.cursor = 'pointer';
+        catToggle.style.fontSize = '0.65rem';
+        catToggle.textContent = catEntry.expanded ? '−' : '+';
+        catToggle.onclick = (e) => {
+          e.stopPropagation();
+          const nowExpanded = catEntry.toggle();
+          catToggle.textContent = nowExpanded ? '−' : '+';
+        };
+        
+        catHeader.appendChild(catLabel);
+        catHeader.appendChild(catToggle);
+        fragment.appendChild(catHeader);
+
+        // Channels in this category
+        for (const c of catEntry.channels) {
+          const isBlocked = blocklist.has(c.id);
+          const isFav = favorites.has(c.id);
+          const status = getStatus(c.id);
+          const statusClass = status === 'working' ? 'status-ok' : status === 'dead' ? 'status-dead' : status === 'testing' ? 'status-testing' : '';
+          const statusIcon = status === 'working' ? '🟢' : status === 'dead' ? '🔴' : status === 'testing' ? '🟡' : '⚪';
+          
+          const rank = channelRank.get(c.id) ?? 2;
+          const div = document.createElement('div');
+          div.className = 'channel' + (isBlocked ? ' blocked' : '') + (rank === 2 ? ' nostream' : '');
+          div.style.height = ITEM_HEIGHT + 'px';
+          div.style.display = 'flex';
+          div.style.alignItems = 'center';
+          div.style.justifyContent = 'space-between';
+          
+          const logoUrl = c.logo || logoMap.get(c.id) || '';
+          const logoHtml = logoUrl
+            ? `<img class="logo" src="${logoUrl}" loading="lazy" onerror="this.style.display='none'">`
+            : `<span class="logo logo-fallback">${(c.name[0] || '?').toUpperCase()}</span>`;
+          
+          const metaParts = simpleMode 
+            ? [c.provider].filter(Boolean)
+            : [c.provider, countryFlag(c.country) + ' ' + c.country, (c.categories || []).join(', ')].filter(Boolean).join(' • ');
+          
+          div.innerHTML = `<span class="status-badge ${statusClass}">${statusIcon}</span>${logoHtml}<button class="fav-btn" data-id="${c.id}" title="Toggle favorite">${isFav ? '★' : '☆'}</button><div class="channel-info"><div class="name">${c.name}</div><div class="meta">${metaParts}${isBlocked ? ` • BLOCKED` : ''}</div></div>`;
+          div.onclick = (e) => {
+            if (e.target.classList.contains('fav-btn')) {
+              const id = e.target.dataset.id;
+              if (favorites.has(id)) favorites.delete(id); else favorites.add(id);
+              scheduleFavoriteFlush();
+              applyFilters();
+            } else {
+              selectChannel(c.id, div);
+            }
+          };
+          fragment.appendChild(div);
+        }
+      }
+    }
+  }
+
+  if (afterHeight > 0) {
+    const spacer = document.createElement('div');
+    spacer.className = 'list-placeholder';
+    spacer.style.height = afterHeight + 'px';
+    list.appendChild(spacer);
+  }
+}
+
+document.getElementById('search').addEventListener('input', () => {
+  clearTimeout(searchDebounce);
+  searchDebounce = setTimeout(() => { applyFilters(); }, 300);
+});
 document.getElementById('country').addEventListener('change', applyFilters);
 document.getElementById('provider').addEventListener('change', applyFilters);
 document.getElementById('favToggle').addEventListener('change', applyFilters);
@@ -731,7 +1248,21 @@ if (simpleToggle) {
     document.body.classList.toggle('simplified', simpleMode);
     localStorage.setItem('iptv_simple_mode', simpleMode);
     simpleToggle.textContent = simpleMode ? 'Advanced Mode' : 'Simple Mode';
-    setTimeout(applyFilters, 100);
+    applyFilters();
+    // Theme switcher
+    const themeSelect = document.getElementById('themeSelect');
+    if (themeSelect) {
+      themeSelect.addEventListener('change', (e) => {
+        const themeMap = {
+          default: '--bg-color: #0a0a0f; --primary-color: #00ffff; --text-color: #e0e0e0;',
+          ocean: '--bg-color: #001f3f; --primary-color: #00bfff; --text-color: #e0e0e0;',
+          purple: '--bg-color: #2d0031; --primary-color: #9b59b6; --text-color: #e0e0e0;',
+          forest: '--bg-color: #228B22; --primary-color: #3cb371; --text-color: #e0e0e0;'
+        };
+        const theme = themeMap[e.target.value] || themeMap['default'];
+        document.documentElement.style.cssText = theme;
+      });
+    }
   });
 }
 
@@ -765,15 +1296,7 @@ document.getElementById('navMore')?.addEventListener('click', (e) => {
 });
 
 // Improve error messages for non-technical users
-const originalPlay = selectChannel;
-function selectChannel(id, el) {
-  try {
-    originalPlay(id, el);
-  } catch (e) {
-    updateChannelStatus('Finding another signal...', 'testing');
-    console.error(e);
-  }
-}
+// (error handling added to original selectChannel below)
 
 // Build streams index for performance
 function buildStreamsIndex() {
@@ -808,7 +1331,7 @@ let searchDebounce = null;
 function updateChannelStatus(message, type = 'info') {
   const el = document.getElementById('channelStatus');
   if (!el) return;
-  el.textContent = `● ${message.toUpperCase()}`;
+  el.textContent = `�? ${message.toUpperCase()}`;
   el.style.color = type === 'error' ? '#ff4444' : type === 'testing' ? 'var(--neon-cyan)' : 'var(--neon-lime)';
 }
 
