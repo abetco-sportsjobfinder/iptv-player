@@ -119,9 +119,9 @@ function countryFlag(code) {
   return String.fromCodePoint(base + a - 65, base + b - 65);
 }
 
-const ITEM_HEIGHT = 56;
-const ROW_HEADER_H = 30;
-const TEST_QUEUE_CAP = 500;
+const ITEM_HEIGHT = 76;
+const ROW_HEADER_H = 32;
+const TEST_QUEUE_CAP = 1500;
 const BUFFER = 10;
 const GOOD_CDNS = ['cloudfront.net', 'akamaized.net', 'akamaihd.net', 'amagi.tv', 'wurl.tv', 'tubi.video', 'pb-', 'aegis-cloudfront', 'airspace-cdn', 'fastly.net', 'd1m1xk35ma8qfl.cloudfront.net', 'pluto.tv'];
 const BAD_CDNS = ['jmp2.uk', 'messi.damitv.st'];
@@ -332,8 +332,23 @@ function updateStats() {
   if (simpleMode) {
     el.textContent = `✅ ${w.toLocaleString()} LIVE • ${filteredChannels.length.toLocaleString()} SHOWS`;
   } else {
-    el.textContent = `🟢 ${w.toLocaleString()} working • 🔴 ${d.toLocaleString()} dead • ⚪ ${(total - w - d).toLocaleString()} untested • ${total.toLocaleString()} with streams`;
+    const tested = w + d;
+    const pct = total ? Math.round((tested / total) * 100) : 0;
+    el.textContent = `🟢 ${w.toLocaleString()} working • 🔴 ${d.toLocaleString()} dead • ⚪ ${(total - tested).toLocaleString()} untested (${pct}% tested) • ${total.toLocaleString()} streams — tap to test more`;
   }
+}
+
+// Extend the background-test queue by n more best-ranked unknown channels
+function extendTesting(n) {
+  const extra = allChannels
+    .filter(c => getStatus(c.id) === 'unknown' && (channelRank.get(c.id) ?? 2) < 2)
+    .filter(c => !testingQueue.includes(c.id))
+    .sort((a, b) => (channelRank.get(a.id) ?? 2) - (channelRank.get(b.id) ?? 2))
+    .slice(0, n)
+    .map(c => c.id);
+  if (!extra.length) { updateStats(); return; }
+  testingQueue.push(...extra);
+  if (!isTesting) { isTesting = true; processQueue(); }
 }
 
 async function loadAllSources() {
@@ -1058,6 +1073,7 @@ function makeChannelRow(c) {
 
   const div = el('div', 'channel' + (blocklist.has(c.id) ? ' blocked' : '') + ((channelRank.get(c.id) ?? 2) >= 2 ? ' nostream' : ''));
   div.style.height = ITEM_HEIGHT + 'px';
+  div.style.minHeight = '0'; // defeat CSS min-heights so virtualization math holds
 
   const badge = el('span', 'status-badge ' + statusClass, statusIcon);
   div.appendChild(badge);
@@ -1139,26 +1155,27 @@ function renderInto(listEl, channels, key) {
   if (st === sig && listEl.children.length > 0) return;
   renderStates.set(key, sig);
 
-  const frag = document.createDocumentFragment();
-  if (starts[s] > 0) {
+  // Atomic swap: no intermediate empty state (prevents momentum-scroll clamp-to-top)
+  const beforeSpacer = starts[s] > 0;
+  const afterSpacer = total > starts[e];
+  const nodes = [];
+  if (beforeSpacer) {
     const before = el('div', 'list-placeholder');
     before.style.height = starts[s] + 'px';
-    frag.appendChild(before);
+    nodes.push(before);
   }
   for (let i = s; i < e; i++) {
     const r = rows[i];
-    if (r.t === 'p') frag.appendChild(makeProviderHeader(r.pe));
-    else if (r.t === 'c') frag.appendChild(makeCategoryHeader(r.ce));
-    else frag.appendChild(makeChannelRow(r.ch));
+    if (r.t === 'p') nodes.push(makeProviderHeader(r.pe));
+    else if (r.t === 'c') nodes.push(makeCategoryHeader(r.ce));
+    else nodes.push(makeChannelRow(r.ch));
   }
-  if (total > starts[e]) {
+  if (afterSpacer) {
     const after = el('div', 'list-placeholder');
     after.style.height = (total - starts[e]) + 'px';
-    frag.appendChild(after);
+    nodes.push(after);
   }
-  listEl.innerHTML = '';
-  listEl.style.position = 'relative';
-  listEl.appendChild(frag);
+  listEl.replaceChildren(...nodes);
 }
 
 function renderVirtualList() {
@@ -1187,7 +1204,33 @@ document.getElementById('workingToggle').addEventListener('change', () => { appl
 document.getElementById('topBtn').addEventListener('click', () => document.getElementById('list').scrollTop = 0);
 document.getElementById('bottomBtn').addEventListener('click', () => { const el = document.getElementById('list'); el.scrollTop = el.scrollHeight; });
 document.getElementById('sidebarToggle').addEventListener('click', () => document.querySelector('main').classList.toggle('collapsed'));
-document.getElementById('list').addEventListener('scroll', renderVirtualList, {passive: true});
+document.getElementById('list').addEventListener('scroll', () => {
+  if (scrollRaf) return;
+  scrollRaf = requestAnimationFrame(() => { scrollRaf = 0; renderVirtualList(); });
+}, {passive: true});
+let scrollRaf = 0;
+
+// Stats bar: tap to keep testing unknown channels
+document.getElementById('stats').addEventListener('click', () => extendTesting(500));
+
+// Window counter: opens/closes the window manager panel (close windows here)
+{
+  const wc = document.getElementById('windowCount');
+  if (wc) {
+    wc.title = 'Manage windows (add/close)';
+    wc.style.cursor = 'pointer';
+    wc.addEventListener('click', () => {
+      const wm = document.getElementById('windowManager');
+      wm.style.display = (wm.style.display === 'block') ? 'none' : 'block';
+      if (wm.style.display === 'block') renderWindowUI();
+    });
+  }
+}
+
+// Mobile: start with the sidebar drawer collapsed so the player is visible
+if (window.matchMedia('(max-width:768px)').matches) {
+  document.querySelector('main').classList.add('collapsed');
+}
 
 // CYBERPUNK UX ENHANCEMENTS
 const simpleToggle = document.getElementById('simpleModeToggle');
