@@ -594,6 +594,11 @@ function applyFiltersToWindow(windowId) {
   // Use this window's filter state (preserving per-window differences)
   // instead of reading global DOM inputs every time
   window.filteredChannels = windowManager._applyFiltersToChannels(allChannels, window.filterState);
+  // Keep the module-level array in sync for legacy callers (loadLogos,
+  // processQueue, scroll handler all render via renderVirtualList)
+  if (windowManager.windows[0] && window.id === windowManager.windows[0].id) {
+    filteredChannels = window.filteredChannels;
+  }
   
   // Re-render this window
   renderVirtualListForWindow(window);
