@@ -310,9 +310,9 @@ async function loadLogos() {
       const res = await fetch('logos.json');
       if (res.ok) {
         const data = await res.json();
-        // Only load first 500 logos to reduce memory
-        const entries = Object.entries(data).slice(0, 500);
-        logoMap = new Map(entries);
+        // Full map: 39k entries is a few MB in memory; the old 500-cap left
+        // 98% of channels without logos
+        logoMap = new Map(Object.entries(data));
         renderVirtualList();
       }
     } catch (e) { /* silent fail */ }
