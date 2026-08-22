@@ -34,7 +34,6 @@ let loadResolved = false;
 let currentId = null;
 let playAttempts = 0;
 let filteredChannels = [];
-let renderWindow = {start: 0, end: 0};
 let activeSources = new Set(Object.keys(SOURCES).filter(k => SOURCES[k].enabled));
 let channelRank = new Map();
 let channelReliable = new Map(); // Cache: channelId -> boolean (reliable has good CDN)
@@ -81,6 +80,7 @@ let windowManager = {
       if (filterState.provider && c.provider !== filterState.provider) return false;
       // Check reliable only
       if (filterState.reliableOnly && !channelReliable.get(c.id)) return false;
+      if (activeCategoryFilter && !(c.categories || []).includes(activeCategoryFilter)) return false;
       // Check working only
       if (filterState.workingOnly && getStatus(c.id) !== 'working') return false;
       // Check name/search match
@@ -91,10 +91,6 @@ let windowManager = {
   // Remove a window by ID
   removeWindow: function(id) {
     this.windows = this.windows.filter(w => w.id !== id);
-  },
-  // Get all filtered channels across all windows (for rendering choice)
-  getAllFiltered: function() {
-    return this.windows.map(w => w.filteredChannels).flat();
   },
   // Sync filter state across all windows (when toggles change)
   syncFilters: function(newFilterState) {
@@ -109,8 +105,9 @@ let isTesting = false;
 let statusSaveTimer = null;
 let remoteDirty = false;
 let remoteTimer = null;
-let refreshLoop = true;
 let simpleMode = false;
+let activeCategoryFilter = null; // set by Quick Categories, applied in _applyFiltersToChannels
+let searchDebounce = null;
 let streamsByChannel = new Map();
 function countryFlag(code) {
   if (!code || code.length !== 2) return '';
@@ -123,10 +120,14 @@ function countryFlag(code) {
 }
 
 const ITEM_HEIGHT = 56;
+const ROW_HEADER_H = 30;
+const TEST_QUEUE_CAP = 500;
 const BUFFER = 10;
 const GOOD_CDNS = ['cloudfront.net', 'akamaized.net', 'akamaihd.net', 'amagi.tv', 'wurl.tv', 'tubi.video', 'pb-', 'aegis-cloudfront', 'airspace-cdn', 'fastly.net', 'd1m1xk35ma8qfl.cloudfront.net', 'pluto.tv'];
 const BAD_CDNS = ['jmp2.uk', 'messi.damitv.st'];
-const STATUS_TTL = 7 * 24 * 60 * 60 * 1000;
+const STATUS_TTL_WORKING = 7 * 24 * 60 * 60 * 1000;
+const STATUS_TTL_DEAD = 3 * 24 * 60 * 60 * 1000;
+const STATUS_TTL_TESTING = 5 * 60 * 1000; // transient state expires fast
 
 // Category display names mapping (from categories array to human-readable labels)
 const CATEGORY_LABELS = {
@@ -138,7 +139,7 @@ const CATEGORY_LABELS = {
   'Children': '👶 Children',
   'Entertainment': '🎭 Entertainment',
   'Documentary': '📖 Documentary',
-  'Family': '👨�� Family',
+  'Family': '\u{1F9F8} Family',
   'Lifestyle': '🧭 Lifestyle'
 };
 
@@ -150,12 +151,12 @@ const PROVIDER_LABELS = {
   'Amagi': 'Amagi',
   'Wurl': 'Wurl',
   'Tubi': 'Tubi',
-  '': 'Unknown'
+  'Bally Sports': 'Bally Sports'
 };
 
 // Group channels by provider for sidebar grouping
 function getProviderGroup(c) {
-  return PROVIDER_LABELS[c.provider] || c.provider || 'Unknown';
+  return PROVIDER_LABELS[c.provider] || c.provider || 'Other';
 }
 
 // Get category badges for a channel
@@ -165,11 +166,6 @@ function getCategoryBadges(c) {
     .filter(cat => CATEGORY_LABELS[cat])
     .map(cat => CATEGORY_LABELS[cat])
     .slice(0, 3); // Max 3 badges per channel
-}
-
-// Initialize category badges cache (called in buildMaps or load)
-function initCategorySystem() {
-  // Category system is computed on-the-fly in render, no persistent cache needed
 }
 
 // Expanded groups state: set of "provider|category" keys that are expanded
@@ -286,13 +282,12 @@ try {
           // just mark as favorite if in KV
         }
       }
-      // Actually, use KV favorites as override: if entry is "working" or present, consider favored
-      // Simpler: just load the Set from KV
+      // Union local favorites with KV favorites so neither side loses toggles
       const kvFavs = new Set(Object.keys(data).filter(k => data[k]));
-      // Prefer KV over local: KV wins
-      favorites = kvFavs;
+      favorites = new Set([...favorites, ...kvFavs]);
     }
   } catch (e) { }
+  await loadRemoteStatus(); // pull shared statuses so devices converge
   // No longer unconditionally reset user filters on startup
   // Apply filters with current state
   applyFilters();
@@ -302,7 +297,6 @@ try {
   setupSourceToggles();
 }
 
-const R2_LOGO_URL = 'https://YOUR_ACCOUNT.r2.cloudflarestorage.com/logos.json'; // <-- set this after enabling R2
 
 async function loadLogos() {
   // Lazy logo loading: only load logos.json on demand for visible channels
@@ -336,7 +330,7 @@ function updateStats() {
   }
   const total = allChannels.filter(c => (channelRank.get(c.id) ?? 2) < 2).length;
   if (simpleMode) {
-    el.textContent = `�? ${w.toLocaleString()} LIVE • ${filteredChannels.length.toLocaleString()} SHOWS`;
+    el.textContent = `✅ ${w.toLocaleString()} LIVE • ${filteredChannels.length.toLocaleString()} SHOWS`;
   } else {
     el.textContent = `🟢 ${w.toLocaleString()} working • 🔴 ${d.toLocaleString()} dead • ⚪ ${(total - w - d).toLocaleString()} untested • ${total.toLocaleString()} with streams`;
   }
@@ -346,12 +340,34 @@ async function loadAllSources() {
   const enabledSources = Object.entries(SOURCES).filter(([_, s]) => s.enabled);
   const results = await Promise.all(enabledSources.map(([key, s]) => loadSource(s, key)));
 
+  dedupeChannelIds(results);
   allChannels = results.flatMap(r => r.channels);
   allStreams = results.flatMap(r => r.streams);
   blocklist = new Map();
   for (const r of results) {
     if (r.blocklist) {
       for (const [k, v] of r.blocklist) blocklist.set(k, v);
+    }
+  }
+}
+
+// Ensure channel ids are globally unique so channelMap/nameLowerCache/status maps never clobber
+function dedupeChannelIds(results) {
+  const seen = new Map();
+  for (const r of results) {
+    const idMap = new Map();
+    for (const c of r.channels) {
+      let id = (c.id && String(c.id).trim()) ? String(c.id).trim()
+        : ((c.name || 'chan').toLowerCase().replace(/[^a-z0-9]/g, '') + '.' + (c.source || 'src'));
+      if (!id) id = 'chan.' + (c.source || 'src');
+      const n = seen.get(id) || 0;
+      seen.set(id, n + 1);
+      const finalId = n === 0 ? id : `${id}~${n}`;
+      if (finalId !== c.id) idMap.set(c.id, finalId);
+      c.id = finalId;
+    }
+    for (const s of r.streams) {
+      if (idMap.has(s.channelId)) s.channelId = idMap.get(s.channelId);
     }
   }
 }
@@ -393,7 +409,7 @@ function parseM3U(text, sourceId) {
       const attrs = parseExtinf(line);
       const name = attrs.name || 'Unknown Channel';
       const ch = {
-        id: attrs['tvg-id'] || name.replace(/[^a-z0-9]/gi, '').toLowerCase(),
+        id: attrs['tvg-id'] || (name.replace(/[^a-z0-9]/gi, '').toLowerCase() + '.' + sourceId),
         name,
         country: attrs['tvg-country'] || '',
         categories: attrs['group-title'] ? [attrs['group-title']] : [],
@@ -448,8 +464,23 @@ function buildMaps() {
   buildStreamsIndex();
 }
 
+function providerFromName(name) {
+  if (!name) return '';
+  const n = String(name).toLowerCase();
+  if (n.startsWith('bally')) return 'Bally Sports';
+  if (n.startsWith('pluto')) return 'Pluto TV';
+  if (n.startsWith('samsung')) return 'Samsung TV Plus';
+  if (n.startsWith('tubi')) return 'Tubi';
+  if (n.startsWith('xumo')) return 'Xumo';
+  if (n.startsWith('plex')) return 'Plex';
+  if (n.startsWith('roku')) return 'Roku';
+  return '';
+}
+
 function inferProvider(ch) {
   if (ch.provider) return ch.provider;
+  const byName = providerFromName(ch.name);
+  if (byName) return byName;
   const streams = streamsByChannel.get(ch.id) || [];
   for (const s of streams) {
     try {
@@ -562,7 +593,7 @@ function applyFiltersToWindow(windowId) {
   
   // Use this window's filter state (preserving per-window differences)
   // instead of reading global DOM inputs every time
-  window.filteredChannels = window._applyFiltersToChannels(allChannels, window.filterState);
+  window.filteredChannels = windowManager._applyFiltersToChannels(allChannels, window.filterState);
   
   // Re-render this window
   renderVirtualListForWindow(window);
@@ -595,17 +626,17 @@ function renderWindowUI() {
   }
   
   windowCountEl.textContent = `${windowManager.windows.length}W`;
-  
+  // Surface the manager panel automatically once more than one window exists
+  const wmPanel = document.getElementById('windowManager');
+  wmPanel.style.display = windowManager.windows.length > 1 ? 'block' : 'none';
+
   // Render window thumbnails/items
   windowListEl.innerHTML = windowManager.windows.map((w, i) => {
     const isPrimary = i === 0;
-    const syncChecked = isPrimary ? 'checked' : '';
-    return `<div style="padding:6px;margin:2px;border:1px solid var(--neon-cyan);border-radius:4;background:rgba(0,255,255,0.03);cursor:pointer;
-              ${isPrimary ? 'border-width:2px' : 'border-width:1px'}' 
-              data-window-id="${w.id}"'>
-      <input type="checkbox" ${syncChecked} style="margin-right:4" id="windowSync-${w.id}">
+    return `<div style="padding:6px;margin:2px;border:1px solid var(--neon-cyan);border-radius:4px;background:rgba(0,255,255,0.03);cursor:pointer;${isPrimary ? 'border-width:2px;' : ''}" data-window-id="${w.id}">
+      <input type="checkbox" ${isPrimary ? 'checked' : ''} style="margin-right:4px" data-window-sync>
       <span style="cursor:pointer">${w.id.replace('window-', '')}</span>
-      <button style="margin-left:4;padding:1px 4;font-size:0.65rem;cursor:pointer">×</button>
+      <button class="win-close" data-close="${w.id}" title="Close window" style="margin-left:4px;padding:1px 4px;font-size:0.65rem;cursor:pointer">\u00d7</button>
     </div>`;
   }).join('');
   
@@ -617,10 +648,18 @@ function renderWindowUI() {
     });
   }
   
-  // Add click handlers for window items
+  // Add click handlers for window items (close button takes priority over promote)
   const clickHandler = (e) => {
+    const closeBtn = e.target.closest('[data-close]');
+    if (closeBtn) {
+      e.stopPropagation();
+      if (windowManager.windows.length > 1) windowManager.removeWindow(closeBtn.dataset.close);
+      renderWindowUI();
+      applyFilters();
+      return;
+    }
     const el = e.target.closest('[data-window-id]');
-    if (!el) return;
+    if (!el || e.target.matches('input')) return;
     const winId = el.dataset.windowId;
     const win = windowManager.windows.find(w => w.id === winId);
     if (win) {
@@ -635,9 +674,9 @@ function renderWindowUI() {
     el.addEventListener('click', clickHandler);
   });
   
-  // Filter sync handler
+  // Filter sync handler — only syncs when the master checkbox is engaged
   filterSyncEl.onchange = () => {
-    const allChecked = Array.from(document.querySelectorAll('#windowManager input[type=checkbox]')).every(c => c.checked);
+    if (!filterSyncEl.checked) return;
     windowManager.syncFilters({
       query: document.getElementById('search').value.toLowerCase(),
       country: document.getElementById('country').value,
@@ -659,20 +698,13 @@ function renderWindowUI() {
 // Initial render
 renderWindowUI();
 
-function isReliable(channelId) {
-  const streams = streamsByChannel.get(channelId) || [];
-  return streams.some(s => s.url && /^https?:\/\//.test(s.url) &&
-    !s.url.includes('youtube.com') && !s.url.includes('.mpd') &&
-    GOOD_CDNS.some(cdn => s.url.includes(cdn)) &&
-    !BAD_CDNS.some(bad => s.url.includes(bad)));
-}
-
 function getStatus(channelId) {
   const cached = streamStatus.get(channelId);
   if (!cached) return 'unknown';
   const age = Date.now() - cached.time;
-  if (cached.status === 'dead') return age < 3 * 24 * 60 * 60 * 1000 ? 'dead' : 'unknown';
-  if (age < 7 * 24 * 60 * 60 * 1000) return cached.status;
+  if (cached.status === 'testing') return age < STATUS_TTL_TESTING ? 'testing' : 'unknown';
+  if (cached.status === 'dead') return age < STATUS_TTL_DEAD ? 'dead' : 'unknown';
+  if (age < STATUS_TTL_WORKING) return cached.status;
   return 'unknown';
 }
 
@@ -704,7 +736,7 @@ async function flushRemoteStatus() {
   if (!remoteDirty) return;
   remoteDirty = false;
   try {
-    const body = JSON.stringify(Object.fromEntries(streamStatus));
+    const body = JSON.stringify(persistableStatus());
     const res = await fetch(`${PROXY}/api/status`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -719,8 +751,27 @@ function loadStatusCache() {
   catch { return new Map(); }
 }
 
+function persistableStatus() {
+  const out = {};
+  for (const [id, entry] of streamStatus) {
+    if (!entry || entry.status === 'testing') continue; // transient state never persists
+    out[id] = entry;
+  }
+  return out;
+}
+
 function saveStatusCache() {
-  localStorage.setItem('iptv_stream_status', JSON.stringify(Object.fromEntries(streamStatus)));
+  try {
+    localStorage.setItem('iptv_stream_status', JSON.stringify(persistableStatus()));
+  } catch (e) {
+    // Quota exceeded: retry once with the oldest half of entries dropped
+    try {
+      const entries = Array.from(streamStatus.entries()).filter(([, v]) => v && v.status !== 'testing');
+      entries.sort((a, b) => (a[1].time || 0) - (b[1].time || 0));
+      const trimmed = Object.fromEntries(entries.slice(Math.floor(entries.length / 2)));
+      localStorage.setItem('iptv_stream_status', JSON.stringify(trimmed));
+    } catch (_) { /* storage unavailable */ }
+  }
 }
 
 async function testStream(channelId) {
@@ -772,7 +823,9 @@ function startBackgroundTesting() {
   isTesting = true;
   testingQueue = allChannels
     .filter(c => getStatus(c.id) === 'unknown')
+    .filter(c => (channelRank.get(c.id) ?? 2) < 2)
     .sort((a, b) => (channelRank.get(a.id) ?? 2) - (channelRank.get(b.id) ?? 2))
+    .slice(0, TEST_QUEUE_CAP)
     .map(c => c.id);
   processQueue();
 }
@@ -840,6 +893,8 @@ function stopPlayback() {
   clearTimeout(loadTimer);
   loadResolved = false;
   const video = document.getElementById('video');
+  video.onerror = null;
+  video.onplaying = null;
   video.pause();
   video.removeAttribute('src');
   video.load();
@@ -910,7 +965,7 @@ function play(url, stream) {
         failPlayback(`HLS error: ${data.details}`);
       }
     });
-    hls.on(Hls.Events.MANIFEST_PARSED, () => { if (playAttempts === 0) setStatus(currentId, 'working'); });
+    hls.on(Hls.Events.MANIFEST_PARSED, () => { if (currentId) setStatus(currentId, 'working'); });
     hls.loadSource(proxied);
     hls.attachMedia(video);
     video.play().catch(() => {});
@@ -924,302 +979,196 @@ function play(url, stream) {
   }, 20000);
 }
 
+// ---------- Unified virtualized grouped-list renderer ----------
+// One renderer replaces the two duplicated legacy functions. It flattens the
+// provider/category hierarchy into rows and virtualizes by pixel offset, so
+// expanding a 27k-channel group can no longer freeze the tab.
+const renderStates = new Map(); // listKey -> last rendered [start,end] signature
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+
+// Flatten grouped channels into visible rows (headers + expanded channels)
+function buildRows(channels) {
+  const rows = [];
+  for (const pe of getGroupedChannels(channels)) {
+    rows.push({ t: 'p', pe });
+    if (!pe.expanded) continue;
+    for (const ce of pe.categories) {
+      rows.push({ t: 'c', ce });
+      if (!ce.expanded) continue;
+      for (const ch of ce.channels) rows.push({ t: 'ch', ch });
+    }
+  }
+  return rows;
+}
+const rowHeight = r => (r.t === 'ch' ? ITEM_HEIGHT : ROW_HEADER_H);
+
+let groupRerenderQueued = false;
+function scheduleGroupRerender() {
+  if (groupRerenderQueued) return;
+  groupRerenderQueued = true;
+  requestAnimationFrame(() => {
+    groupRerenderQueued = false;
+    renderVirtualList();
+  });
+}
+
+function makeProviderHeader(pe) {
+  const d = el('div', 'provider-group-header');
+  d.style.height = ROW_HEADER_H + 'px';
+  d.appendChild(el('span', 'pg-label', `${pe.expanded ? '\u25BC' : '\u25B6'} ${pe.provider} (${pe.channels.length})`));
+  const btn = el('button', 'pg-toggle', pe.expanded ? '\u2212' : '+');
+  btn.addEventListener('click', ev => { ev.stopPropagation(); pe.toggle(); renderStates.clear(); scheduleGroupRerender(); });
+  d.appendChild(btn);
+  d.addEventListener('click', () => { pe.toggle(); renderStates.clear(); scheduleGroupRerender(); });
+  return d;
+}
+
+function makeCategoryHeader(ce) {
+  const d = el('div', 'category-group-header');
+  d.style.height = ROW_HEADER_H + 'px';
+  d.appendChild(el('span', 'pg-label', `${ce.label} (${ce.channels.length})`));
+  const btn = el('button', 'pg-toggle', ce.expanded ? '\u2212' : '+');
+  btn.addEventListener('click', ev => { ev.stopPropagation(); ce.toggle(); renderStates.clear(); scheduleGroupRerender(); });
+  d.appendChild(btn);
+  d.addEventListener('click', () => { ce.toggle(); renderStates.clear(); scheduleGroupRerender(); });
+  return d;
+}
+
+function makeLogoFallback(c) {
+  return el('span', 'logo logo-fallback', ((c.name || '?')[0] || '?').toUpperCase());
+}
+
+// Rows are built with DOM APIs only — channel names/logos come from public
+// playlists, so innerHTML interpolation here would be an XSS vector.
+function makeChannelRow(c) {
+  const status = getStatus(c.id);
+  const statusClass = status === 'working' ? 'status-ok' : status === 'dead' ? 'status-dead' : status === 'testing' ? 'status-testing' : '';
+  const statusIcon = status === 'working' ? '\uD83D\uDFE2' : status === 'dead' ? '\uD83D\uDD34' : status === 'testing' ? '\uD83D\uDFE1' : '\u26AA';
+
+  const div = el('div', 'channel' + (blocklist.has(c.id) ? ' blocked' : '') + ((channelRank.get(c.id) ?? 2) >= 2 ? ' nostream' : ''));
+  div.style.height = ITEM_HEIGHT + 'px';
+
+  const badge = el('span', 'status-badge ' + statusClass, statusIcon);
+  div.appendChild(badge);
+
+  const logoUrl = c.logo || logoMap.get(c.id) || '';
+  let logoNode;
+  if (logoUrl) {
+    const img = document.createElement('img');
+    img.className = 'logo';
+    img.loading = 'lazy';
+    img.referrerPolicy = 'no-referrer';
+    img.alt = c.name || '';
+    img.addEventListener('error', () => img.replaceWith(makeLogoFallback(c)), { once: true });
+    img.src = logoUrl; // assigned last so the error handler is attached first
+    logoNode = img;
+  } else {
+    logoNode = makeLogoFallback(c);
+  }
+  div.appendChild(logoNode);
+
+  const info = el('div', 'channel-info');
+  info.appendChild(el('div', 'name', c.name || '(unnamed)'));
+  const meta = el('div', 'meta');
+  const bits = [];
+  if (!simpleMode && c.provider) bits.push(c.provider);
+  if (!simpleMode && c.country) bits.push((countryFlag(c.country) ? countryFlag(c.country) + ' ' : '') + c.country);
+  if (!simpleMode && (c.categories || []).length) bits.push(c.categories.join(', '));
+  meta.appendChild(el('span', null, bits.join(' \u2022 ') + (blocklist.has(c.id) ? ' \u2022 BLOCKED' : '')));
+  for (const b of getCategoryBadges(c)) meta.appendChild(el('span', 'badge', b));
+  info.appendChild(meta);
+  div.appendChild(info);
+
+  const favBtn = el('button', 'fav-btn' + (favorites.has(c.id) ? ' active' : ''), favorites.has(c.id) ? '\u2605' : '\u2606');
+  favBtn.title = 'Toggle favorite';
+  favBtn.addEventListener('click', ev => {
+    ev.stopPropagation();
+    if (favorites.has(c.id)) favorites.delete(c.id); else favorites.add(c.id);
+    try { localStorage.setItem('iptv_favs', JSON.stringify(Array.from(favorites))); } catch (_) {}
+    scheduleFavoriteFlush();
+    applyFilters();
+  });
+  div.appendChild(favBtn);
+
+  div.addEventListener('click', () => selectChannel(c.id, div));
+  return div;
+}
+
+function renderInto(listEl, channels, key) {
+  if (!listEl) return;
+  if (!channels.length) {
+    listEl.innerHTML = '';
+    listEl.style.position = '';
+    listEl.appendChild(el('div', 'empty', 'No channels match'));
+    return;
+  }
+
+  const rows = buildRows(channels);
+  const starts = new Array(rows.length + 1);
+  let total = 0;
+  for (let i = 0; i < rows.length; i++) { starts[i] = total; total += rowHeight(rows[i]); }
+  starts[rows.length] = total;
+
+  const viewH = listEl.clientHeight || 600;
+  const yStart = Math.max(0, (listEl.scrollTop || 0) - BUFFER * ITEM_HEIGHT);
+  const yEnd = (listEl.scrollTop || 0) + viewH + BUFFER * ITEM_HEIGHT;
+
+  let s = 0, lo = 0, hi = rows.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (starts[mid + 1] <= yStart) lo = mid + 1; else hi = mid - 1;
+  }
+  s = Math.min(lo, rows.length);
+  let e = s;
+  while (e < rows.length && starts[e] < yEnd) e++;
+  e = Math.min(rows.length, Math.max(e, s + 1));
+
+  const sig = s + ':' + e;
+  const st = renderStates.get(key);
+  if (st === sig && listEl.children.length > 0) return;
+  renderStates.set(key, sig);
+
+  const frag = document.createDocumentFragment();
+  if (starts[s] > 0) {
+    const before = el('div', 'list-placeholder');
+    before.style.height = starts[s] + 'px';
+    frag.appendChild(before);
+  }
+  for (let i = s; i < e; i++) {
+    const r = rows[i];
+    if (r.t === 'p') frag.appendChild(makeProviderHeader(r.pe));
+    else if (r.t === 'c') frag.appendChild(makeCategoryHeader(r.ce));
+    else frag.appendChild(makeChannelRow(r.ch));
+  }
+  if (total > starts[e]) {
+    const after = el('div', 'list-placeholder');
+    after.style.height = (total - starts[e]) + 'px';
+    frag.appendChild(after);
+  }
+  listEl.innerHTML = '';
+  listEl.style.position = 'relative';
+  listEl.appendChild(frag);
+}
+
 function renderVirtualList() {
-  const list = document.getElementById('list');
-  const scrollTop = list.scrollTop;
-  const clientHeight = list.clientHeight;
-  const totalItems = filteredChannels.length;
-
-  if (totalItems === 0) {
-    list.innerHTML = '<div class="empty">No channels match</div>';
-    return;
-  }
-
-  const visibleStart = Math.floor(scrollTop / ITEM_HEIGHT);
-  const visibleCount = Math.ceil(clientHeight / ITEM_HEIGHT);
-  const newStart = Math.max(0, visibleStart - BUFFER);
-  const newEnd = Math.min(totalItems, visibleStart + visibleCount + BUFFER);
-
-  if (renderWindow.start === newStart && renderWindow.end === newEnd && list.children.length > 0) return;
-  renderWindow = {start: newStart, end: newEnd};
-
-  if (filteredChannels.length === 0) {
-    list.innerHTML = '<div class="empty">No channels match</div>';
-    list.style.height = '100px';
-    list.style.position = 'relative';
-    if (afterHeight > 0) {
-      const spacer = document.createElement('div');
-      spacer.className = 'list-placeholder';
-      spacer.style.height = afterHeight + 'px';
-      list.appendChild(spacer);
-    }
-    return;
-  }
-
-  const hierarchy = getGroupedChannels(filteredChannels);
-  
-  const totalHeight = filteredChannels.length * ITEM_HEIGHT;
-  const beforeHeight = newStart * ITEM_HEIGHT;
-  const afterHeight = totalHeight - newEnd * ITEM_HEIGHT;
-
-  list.innerHTML = '';
-  list.style.height = totalHeight + 'px';
-  list.style.position = 'relative';
-
-  if (beforeHeight > 0) {
-    const spacer = document.createElement('div');
-    spacer.className = 'list-placeholder';
-    spacer.style.height = beforeHeight + 'px';
-    list.appendChild(spacer);
-  }
-
-  const fragment = document.createDocumentFragment();
-
-  for (const providerEntry of hierarchy) {
-    // Provider header with toggle
-    const providerHeader = document.createElement('div');
-    providerHeader.className = 'provider-group-header';
-    providerHeader.style.cssText = 'padding: 4px 8px; background: rgba(0,255,255,0.03); border: 1px solid var(--border-glow); border-radius: 4px; margin: 4px 0; cursor: pointer; display: flex; justify-content: space-between; align-items: center;';
-    
-    const headerText = document.createElement('span');
-    headerText.style.color = 'var(--neon-cyan)';
-    headerText.style.fontWeight = '700';
-    headerText.style.fontSize = '0.75rem';
-    headerText.textContent = `${providerEntry.provider} ${providerEntry.expanded ? '▼' : '▶'}`;
-    
-    const toggleBtn = document.createElement('button');
-    toggleBtn.style.background = 'transparent';
-    toggleBtn.style.border = 'none';
-    toggleBtn.style.color = 'var(--neon-cyan)';
-    toggleBtn.style.cursor = 'pointer';
-    toggleBtn.style.fontSize = '0.65rem';
-    toggleBtn.textContent = '+';
-    toggleBtn.onclick = (e) => {
-      e.stopPropagation();
-      const nowExpanded = providerEntry.toggle();
-      headerText.textContent = `${providerEntry.provider} ${nowExpanded ? '▼' : '▶'}`;
-    };
-    
-    providerHeader.appendChild(headerText);
-    providerHeader.appendChild(toggleBtn);
-    fragment.appendChild(providerHeader);
-
-    // Category sub-sections within provider (only if expanded)
-    if (providerEntry.expanded) {
-      for (const catEntry of providerEntry.categories) {
-        // Category header with toggle
-        const catHeader = document.createElement('div');
-        catHeader.style.cssText = 'padding: 2px 6px; background: rgba(0,255,255,0.02); border-bottom: 1px solid var(--border-glow); border-radius: 0 0 4px 4; margin: 2px 0; cursor: pointer; font-size: 0.65rem; color: var(--text-secondary);';
-        
-        const catLabel = document.createElement('span');
-        catLabel.textContent = catEntry.label;
-        
-        const catToggle = document.createElement('button');
-        catToggle.style.background = 'transparent';
-        catToggle.style.border = 'none';
-        catToggle.style.color = 'var(--neon-cyan)';
-        catToggle.style.cursor = 'pointer';
-        catToggle.style.fontSize = '0.65rem';
-        catToggle.textContent = catEntry.expanded ? '−' : '+';
-        catToggle.onclick = (e) => {
-          e.stopPropagation();
-          const nowExpanded = catEntry.toggle();
-          catToggle.textContent = nowExpanded ? '−' : '+';
-        };
-        
-        catHeader.appendChild(catLabel);
-        catHeader.appendChild(catToggle);
-        fragment.appendChild(catHeader);
-
-        // Channels in this category
-        for (const c of catEntry.channels) {
-          const isBlocked = blocklist.has(c.id);
-          const reason = blocklist.get(c.id);
-          const isFav = favorites.has(c.id);
-          const status = getStatus(c.id);
-          const statusClass = status === 'working' ? 'status-ok' : status === 'dead' ? 'status-dead' : status === 'testing' ? 'status-testing' : '';
-          const statusIcon = status === 'working' ? '🟢' : status === 'dead' ? '🔴' : status === 'testing' ? '🟡' : '⚪';
-          
-          const rank = channelRank.get(c.id) ?? 2;
-          const div = document.createElement('div');
-          div.className = 'channel' + (isBlocked ? ' blocked' : '') + (rank === 2 ? ' nostream' : '');
-          div.dataset.id = c.id;
-          div.style.height = ITEM_HEIGHT + 'px';
-          div.style.display = 'flex';
-          div.style.alignItems = 'center';
-          div.style.justifyContent = 'space-between';
-          
-          const logoUrl = c.logo || logoMap.get(c.id) || '';
-          const logoHtml = logoUrl
-            ? `<img class="logo" src="${logoUrl}" loading="lazy" onerror="this.style.display='none'">`
-            : `<span class="logo logo-fallback">${(c.name[0] || '?').toUpperCase()}</span>`;
-          
-          const metaParts = [c.provider, countryFlag(c.country) + ' ' + c.country, (c.categories || []).join(', ')].filter(Boolean).join(' • ');
-          
-          div.innerHTML = `<span class="status-badge ${statusClass}">${statusIcon}</span>${logoHtml}<button class="fav-btn" data-id="${c.id}" title="Toggle favorite">${isFav ? '★' : '☆'}</button><div class="channel-info"><div class="name">${c.name}</div><div class="meta">${metaParts}${isBlocked ? ` • BLOCKED` : ''}</div></div>`;
-          div.onclick = (e) => {
-            if (e.target.classList.contains('fav-btn')) {
-              const id = e.target.dataset.id;
-              if (favorites.has(id)) favorites.delete(id); else favorites.add(id);
-              scheduleFavoriteFlush();
-              applyFilters();
-            } else {
-              selectChannel(c.id, div);
-            }
-          };
-          fragment.appendChild(div);
-        }
-      }
-    }
-  }
-
-  if (afterHeight > 0) {
-    const spacer = document.createElement('div');
-    spacer.className = 'list-placeholder';
-    spacer.style.height = afterHeight + 'px';
-    list.appendChild(spacer);
-  }
+  renderInto(document.getElementById('list'), filteredChannels, '__main__');
 }
 
-// NEW: Render virtual list for a specific window's filtered channels
-function renderVirtualListForWindow(window) {
-  const list = window.element ? document.getElementById(`window-list-${window.id}`) : document.getElementById('list');
-  const hierarchy = window ? getGroupedChannels(window.filteredChannels) : getGroupedChannels(filteredChannels);
-  
-  if (window) {
-    list = document.getElementById(`window-list-${window.id}`) || list;
-  }
-  
-  list.innerHTML = '';
-  const totalHeight = window ? window.filteredChannels.length * ITEM_HEIGHT : filteredChannels.length * ITEM_HEIGHT;
-  list.style.height = totalHeight + 'px';
-  list.style.position = 'relative';
-
-  const visibleStart = list ? list.scrollTop / ITEM_HEIGHT : 0;
-  const visibleCount = list ? list.clientHeight / ITEM_HEIGHT : 0;
-  const newStart = Math.max(0, Math.floor(visibleStart - BUFFER));
-  const newEnd = Math.min((window ? window.filteredChannels.length : filteredChannels.length), Math.floor(visibleStart + visibleCount + BUFFER));
-
-  if (renderWindow.start === newStart && renderWindow.end === newEnd && (list?.children?.length > 0)) return;
-  renderWindow = {start: newStart, end: newEnd};
-
-  const beforeHeight = newStart * ITEM_HEIGHT;
-  const afterHeight = totalHeight - newEnd * ITEM_HEIGHT;
-
-  if (beforeHeight > 0) {
-    const spacer = document.createElement('div');
-    spacer.className = 'list-placeholder';
-    spacer.style.height = beforeHeight + 'px';
-    list.appendChild(spacer);
-  }
-
-  const fragment = document.createDocumentFragment();
-
-  for (const providerEntry of hierarchy) {
-    // Provider header with toggle
-    const providerHeader = document.createElement('div');
-    providerHeader.className = 'provider-group-header';
-    providerHeader.style.cssText = 'padding: 4px 8px; background: rgba(0,255,255,0.03); border: 1px solid var(--border-glow); border-radius: 4px; margin: 4px 0; cursor: pointer; display: flex; justify-content: space-between; align-items: center;';
-    
-    const headerText = document.createElement('span');
-    headerText.style.color = 'var(--neon-cyan)';
-    headerText.style.fontWeight = '700';
-    headerText.style.fontSize = '0.75rem';
-    headerText.textContent = `${providerEntry.provider} ${providerEntry.expanded ? '▼' : '▶'}`;
-    
-    const toggleBtn = document.createElement('button');
-    toggleBtn.style.background = 'transparent';
-    toggleBtn.style.border = 'none';
-    toggleBtn.style.color = 'var(--neon-cyan)';
-    toggleBtn.style.cursor = 'pointer';
-    toggleBtn.style.fontSize = '0.65rem';
-    toggleBtn.textContent = '+';
-    toggleBtn.onclick = (e) => {
-      e.stopPropagation();
-      const nowExpanded = providerEntry.toggle();
-      headerText.textContent = `${providerEntry.provider} ${nowExpanded ? '▼' : '▶'}`;
-    };
-    
-    providerHeader.appendChild(headerText);
-    providerHeader.appendChild(toggleBtn);
-    fragment.appendChild(providerHeader);
-
-    // Category sub-sections within provider (only if expanded)
-    if (providerEntry.expanded) {
-      for (const catEntry of providerEntry.categories) {
-        // Category header with toggle
-        const catHeader = document.createElement('div');
-        catHeader.style.cssText = 'padding: 2px 6px; background: rgba(0,255,255,0.02); border-bottom: 1px solid var(--border-glow); border-radius: 0 0 4px 4; margin: 2px 0; cursor: pointer; font-size: 0.65rem; color: var(--text-secondary);';
-        
-        const catLabel = document.createElement('span');
-        catLabel.textContent = catEntry.label;
-        
-        const catToggle = document.createElement('button');
-        catToggle.style.background = 'transparent';
-        catToggle.style.border = 'none';
-        catToggle.style.color = 'var(--neon-cyan)';
-        catToggle.style.cursor = 'pointer';
-        catToggle.style.fontSize = '0.65rem';
-        catToggle.textContent = catEntry.expanded ? '−' : '+';
-        catToggle.onclick = (e) => {
-          e.stopPropagation();
-          const nowExpanded = catEntry.toggle();
-          catToggle.textContent = nowExpanded ? '−' : '+';
-        };
-        
-        catHeader.appendChild(catLabel);
-        catHeader.appendChild(catToggle);
-        fragment.appendChild(catHeader);
-
-        // Channels in this category
-        for (const c of catEntry.channels) {
-          const isBlocked = blocklist.has(c.id);
-          const isFav = favorites.has(c.id);
-          const status = getStatus(c.id);
-          const statusClass = status === 'working' ? 'status-ok' : status === 'dead' ? 'status-dead' : status === 'testing' ? 'status-testing' : '';
-          const statusIcon = status === 'working' ? '🟢' : status === 'dead' ? '🔴' : status === 'testing' ? '🟡' : '⚪';
-          
-          const rank = channelRank.get(c.id) ?? 2;
-          const div = document.createElement('div');
-          div.className = 'channel' + (isBlocked ? ' blocked' : '') + (rank === 2 ? ' nostream' : '');
-          div.style.height = ITEM_HEIGHT + 'px';
-          div.style.display = 'flex';
-          div.style.alignItems = 'center';
-          div.style.justifyContent = 'space-between';
-          
-          const logoUrl = c.logo || logoMap.get(c.id) || '';
-          const logoHtml = logoUrl
-            ? `<img class="logo" src="${logoUrl}" loading="lazy" onerror="this.style.display='none'">`
-            : `<span class="logo logo-fallback">${(c.name[0] || '?').toUpperCase()}</span>`;
-          
-          const metaParts = simpleMode 
-            ? [c.provider].filter(Boolean)
-            : [c.provider, countryFlag(c.country) + ' ' + c.country, (c.categories || []).join(', ')].filter(Boolean).join(' • ');
-          
-          div.innerHTML = `<span class="status-badge ${statusClass}">${statusIcon}</span>${logoHtml}<button class="fav-btn" data-id="${c.id}" title="Toggle favorite">${isFav ? '★' : '☆'}</button><div class="channel-info"><div class="name">${c.name}</div><div class="meta">${metaParts}${isBlocked ? ` • BLOCKED` : ''}</div></div>`;
-          div.onclick = (e) => {
-            if (e.target.classList.contains('fav-btn')) {
-              const id = e.target.dataset.id;
-              if (favorites.has(id)) favorites.delete(id); else favorites.add(id);
-              scheduleFavoriteFlush();
-              applyFilters();
-            } else {
-              selectChannel(c.id, div);
-            }
-          };
-          fragment.appendChild(div);
-        }
-      }
-    }
-  }
-
-  if (afterHeight > 0) {
-    const spacer = document.createElement('div');
-    spacer.className = 'list-placeholder';
-    spacer.style.height = afterHeight + 'px';
-    list.appendChild(spacer);
-  }
+// Per-window entry point. Windows currently share the main list element until
+// per-window panes exist; the signature map keeps their ranges independent.
+function renderVirtualListForWindow(win) {
+  if (!win) { renderVirtualList(); return; }
+  const listEl = win.element || document.getElementById(`window-list-${win.id}`) || document.getElementById('list');
+  renderInto(listEl, win.filteredChannels, win.id);
 }
+
+function updateStatsForWindow() { updateStats(); }
 
 document.getElementById('search').addEventListener('input', () => {
   clearTimeout(searchDebounce);
@@ -1249,40 +1198,58 @@ if (simpleToggle) {
     localStorage.setItem('iptv_simple_mode', simpleMode);
     simpleToggle.textContent = simpleMode ? 'Advanced Mode' : 'Simple Mode';
     applyFilters();
-    // Theme switcher
-    const themeSelect = document.getElementById('themeSelect');
-    if (themeSelect) {
-      themeSelect.addEventListener('change', (e) => {
-        const themeMap = {
-          default: '--bg-color: #0a0a0f; --primary-color: #00ffff; --text-color: #e0e0e0;',
-          ocean: '--bg-color: #001f3f; --primary-color: #00bfff; --text-color: #e0e0e0;',
-          purple: '--bg-color: #2d0031; --primary-color: #9b59b6; --text-color: #e0e0e0;',
-          forest: '--bg-color: #228B22; --primary-color: #3cb371; --text-color: #e0e0e0;'
-        };
-        const theme = themeMap[e.target.value] || themeMap['default'];
-        document.documentElement.style.cssText = theme;
-      });
-    }
   });
+}
+
+// Theme switcher — registered once at startup; maps onto the custom properties
+// the stylesheet actually consumes (--bg / --neon-cyan / --text-primary), persisted across reloads.
+{
+  const THEMES = {
+    default: { bg: '#0a0a0f', accent: '#00ffff', text: '#e0e0e0' },
+    ocean:   { bg: '#001f3f', accent: '#00bfff', text: '#e0e0e0' },
+    purple:  { bg: '#2d0031', accent: '#ff00ff', text: '#f2e8f7' },
+    forest:  { bg: '#071a07', accent: '#00ff88', text: '#e8f7ee' }
+  };
+  function applyTheme(t) {
+    const root = document.documentElement.style;
+    root.setProperty('--bg', t.bg);
+    root.setProperty('--bg-card', t.bg + 'cc');
+    root.setProperty('--bg-glass', t.bg + '99');
+    root.setProperty('--neon-cyan', t.accent);
+    root.setProperty('--neon-lime', t.accent === '#00ffff' ? '#00ff88' : t.accent);
+    root.setProperty('--border-glow', t.accent + '4d');
+    root.setProperty('--text-primary', t.text);
+  }
+  const themeSelect = document.getElementById('themeSelect');
+  if (themeSelect) {
+    const saved = localStorage.getItem('iptv_theme');
+    if (saved && THEMES[saved]) { themeSelect.value = saved; applyTheme(THEMES[saved]); }
+    themeSelect.addEventListener('change', (e) => {
+      const t = THEMES[e.target.value] || THEMES.default;
+      try { localStorage.setItem('iptv_theme', e.target.value); } catch (_) {}
+      applyTheme(t);
+    });
+  }
 }
 
 // Quick Categories for Simple Mode
 const quickCats = document.getElementById('quickCategories');
 if (quickCats) {
   quickCats.addEventListener('click', () => {
+    // Cycle through real category filters (matches channel categories, not name search)
     const cats = ['Kids', 'News', 'Sports', 'Movies', 'Music', 'Children'];
-    const chosen = prompt('Pick category:\n' + cats.join('\n'), 'Kids');
-    if (chosen) {
-      document.getElementById('search').value = chosen;
-      applyFilters();
-    }
+    const next = cats[(cats.indexOf(activeCategoryFilter) + 1) % (cats.length + 1)] || '';
+    activeCategoryFilter = next;
+    quickCats.textContent = next ? ('\uD83C\uDFAF ' + next) : '\uD83C\uDFAF Quick Categories';
+    applyFilters();
   });
 }
 
 // Mobile bottom nav handlers
 document.getElementById('navFavs')?.addEventListener('click', (e) => {
   e.preventDefault();
-  document.getElementById('favToggle').checked = true;
+  const t = document.getElementById('favToggle');
+  t.checked = !t.checked; // toggle, don't force-on
   applyFilters();
 });
 document.getElementById('navSearch')?.addEventListener('click', (e) => {
@@ -1317,7 +1284,7 @@ function scheduleFavoriteFlush() {
 
 async function flushFavoriteFavorites() {
   try {
-    const body = JSON.stringify(Array.from(favorites));
+    const body = JSON.stringify(Object.fromEntries(Array.from(favorites).map(id => [id, true])));
     await fetch(`${PROXY}/api/favorites`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -1326,16 +1293,12 @@ async function flushFavoriteFavorites() {
   } catch (e) { }
 }
 
-let searchDebounce = null;
 
 function updateChannelStatus(message, type = 'info') {
   const el = document.getElementById('channelStatus');
   if (!el) return;
-  el.textContent = `�? ${message.toUpperCase()}`;
+  el.textContent = `● ${message.toUpperCase()}`;
   el.style.color = type === 'error' ? '#ff4444' : type === 'testing' ? 'var(--neon-cyan)' : 'var(--neon-lime)';
 }
-
-// Override play error messages
-const originalPlay = window.selectChannel || null;
 
 load();

@@ -34,7 +34,7 @@ async function fetchText(url) {
 function proxyUrl(url, ua, ref) {
   const params = new URLSearchParams({ u: url });
   if (ua) params.set('ua', ua);
-  if (ref) params.set('ref', ref);
+  if (ref) params.set('r', ref);
   return `${PROXY}?${params.toString()}`;
 }
 

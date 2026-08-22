@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -36,13 +36,13 @@
 <input id="search" placeholder="⌕ SEARCH CHANNELS..." autocomplete="off" />
 <button id="quickCategories" class="glass-button" style="width:100%">🎯 Quick Categories</button>
 <select id="country">
-<option value="">�? All Countries</option>
+<option value="">📺 All Countries</option>
 </select>
 <select id="provider">
 <option value="">📡 All Providers</option>
 </select>
 <div id="simpleFilters" style="display:flex;flex-direction:column;gap:10px">
-<label><input type="checkbox" id="favToggle" autocomplete="off"> �? Favorites Only</label>
+<label><input type="checkbox" id="favToggle" autocomplete="off"> ❤️ Favorites Only</label>
 <label><input type="checkbox" id="reliableToggle" autocomplete="off"> ⚡ Reliable Only</label>
 <label><input type="checkbox" id="workingToggle" autocomplete="off"> ✅ Tested Working</label>
 </div>
@@ -59,14 +59,12 @@
 <button id="topBtn">↑ TOP</button>
 <button id="bottomBtn">↓ BOTTOM</button>
 </div>
-</div>
-</div>
 <div id="list"><div class="empty">INITIALIZING STREAM MATRIX...</div></div>
 <div id="stats">SYNCING NODE NETWORK...</div>
 </aside>
 <div class="player">
 <div class="glass-card" style="position:absolute;top:16px;left:16px;z-index:10;padding:12px 20px;border-radius:12px">
-<span id="channelStatus" style="color:var(--neon-lime);font-family:var(--font-mono);font-size:0.85rem">�? IDLE</span>
+<span id="channelStatus" style="color:var(--neon-lime);font-family:var(--font-mono);font-size:0.85rem">● IDLE</span>
 </div>
 <video id="video" controls autoplay playsinline></video>
 <div class="info" id="info">
@@ -79,7 +77,7 @@
 <ul>
 <li><a href="#" class="active"><span class="icon">📺</span><span class="label">Live</span></a></li>
 <li><a href="#" id="navSearch"><span class="icon">⌕</span><span class="label">Search</span></a></li>
-<li><a href="#" id="navFavs"><span class="icon">�?</span><span class="label">Favs</span></a></li>
+<li><a href="#" id="navFavs"><span class="icon">❤️</span><span class="label">Favs</span></a></li>
 <li><a href="#" id="navMore"><span class="icon">⚙</span><span class="label">More</span></a></li>
 </ul>
 </nav>
